@@ -1,0 +1,5 @@
+{
+  "baseUrl": "",
+  "tokenHeader": "x-voxsy-token",
+  "tokenQuery": "voxsy_token"
+}

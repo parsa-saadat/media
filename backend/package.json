@@ -1,0 +1,17 @@
+{
+  "name": "@inebuly/backend",
+  "version": "1.0.0",
+  "description": "inebuly API — Node.js + MongoDB (سشن، گروه، پیام، فایل، تماس صوتی و تصویری، اذان)",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "mongodb": "^7.9.1",
+    "mongodb-memory-server-core": "^11.3.0"
+  }
+}

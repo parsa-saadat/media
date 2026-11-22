@@ -1,0 +1,12 @@
+import tailwindcss from "@tailwindcss/vite";
+import react from "@vitejs/plugin-react";
+import { defineConfig } from "vite";
+
+const backend = process.env.INEBULY_BACKEND_URL || process.env.VOXSY_BACKEND_URL || "http://127.0.0.1:4000";
+const proxy = { "/api": { target: backend, changeOrigin: true } };
+
+export default defineConfig({
+  plugins: [react(), tailwindcss()],
+  server: { host: "0.0.0.0", port: 5173, allowedHosts: true, proxy },
+  preview: { host: "0.0.0.0", port: 4173, allowedHosts: true, proxy },
+});

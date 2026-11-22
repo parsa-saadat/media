@@ -1,0 +1,76 @@
+import { faNum } from "../../utils/client";
+import { Icon } from "../common/Icon";
+
+const LINES = [
+  [0, 1, 2], [3, 4, 5], [6, 7, 8],
+  [0, 3, 6], [1, 4, 7], [2, 5, 8],
+  [0, 4, 8], [2, 4, 6],
+];
+
+/** Classic tic-tac-toe with a warm wooden-board look. */
+export default function TicTacToe({ game, myToken, onMove, busy }) {
+  const cells = game.state.cells || Array(9).fill(null);
+  const mySeat = game.players.findIndex((p) => p.joinToken === myToken);
+  const myMark = mySeat === 0 ? "X" : mySeat === 1 ? "O" : null;
+  const isMyTurn = game.status === "playing" && game.turn === myToken;
+  const winnerLine = LINES.find(([a, b, c]) => cells[a] && cells[a] === cells[b] && cells[b] === cells[c]);
+  const mark = (v) => (v === "X" ? "✕" : "◯");
+
+  return (
+    <div className="flex flex-col items-center gap-4">
+      <div className="relative w-full max-w-[420px] rounded-xl p-4 shadow-2xl"
+        style={{ background: "linear-gradient(150deg,#8a5a2b,#6d4420 55%,#8a5a2b)", boxShadow: "inset 0 2px 0 rgba(255,255,255,.18), 0 20px 40px -18px rgba(0,0,0,.8)" }}>
+        {/* wood grain */}
+        <div className="pointer-events-none absolute inset-0 rounded-xl opacity-30"
+          style={{ background: "repeating-linear-gradient(97deg, rgba(0,0,0,.14) 0 3px, transparent 3px 26px)" }} />
+        <div className="relative grid grid-cols-3 gap-2.5">
+          {cells.map((v, i) => {
+            const winning = winnerLine?.includes(i);
+            return (
+              <button
+                key={i}
+                type="button"
+                disabled={!isMyTurn || busy || !!v || !myMark}
+                onClick={() => onMove({ cell: i })}
+                className={`flex aspect-square items-center justify-center rounded-lg text-[52px] font-black leading-none transition-all duration-200 disabled:cursor-default ${
+                  winning ? "bg-amber-300/90 shadow-[0_0_24px_rgba(252,211,77,.7)]" : v || !isMyTurn || !myMark ? "bg-[#3d2a13]/60" : "bg-[#3d2a13]/60 hover:bg-[#4d3519]/80 active:scale-95"
+                }`}
+                style={{ boxShadow: "inset 0 2px 6px rgba(0,0,0,.45), inset 0 -1px 0 rgba(255,255,255,.06)" }}
+              >
+                {v && (
+                  <span className={v === "X" ? "text-[#ff7b6b] drop-shadow-[0_2px_6px_rgba(255,60,40,.5)] anim-pop" : "text-[#6ec6ff] drop-shadow-[0_2px_6px_rgba(60,160,255,.5)] anim-pop"}>
+                    {mark(v)}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      <Players game={game} myToken={myToken} marks={["✕", "◯"]} hint={isMyTurn ? "نوبت شماست — یکی از خانه‌ها را انتخاب کنید" : "منتظر حریف…"} />
+    </div>
+  );
+}
+
+export function Players({ game, myToken, marks, hint }) {
+  const turnIdx = game.players.findIndex((p) => p.joinToken === game.turn);
+  return (
+    <div className="w-full max-w-[420px]">
+      <div className="flex items-center justify-center gap-3">
+        {game.players.map((p, i) => (
+          <div key={p.joinToken} className={`flex items-center gap-2 rounded-lg px-3 py-2 transition ${game.turn === p.joinToken && game.status === "playing" ? "bg-accent/20 ring-1 ring-accent/60" : "bg-surface-2/70"}`}>
+            <span className="flex h-8 w-8 items-center justify-center rounded-xl text-white font-black" style={{ background: p.avatarColor }}>
+              {marks ? (marks[i] ?? i + 1) : faNum(i + 1)}
+            </span>
+            <span className="text-xs font-bold">{p.name}{p.joinToken === myToken && <span className="text-muted"> (شما)</span>}</span>
+          </div>
+        ))}
+      </div>
+      {game.status === "playing" && hint && (
+        <p className="mt-3 flex items-center justify-center gap-1.5 text-center text-xs font-bold text-accent">
+          <Icon name="gamepad" size={14} /> {hint}
+        </p>
+      )}
+    </div>
+  );
+}
