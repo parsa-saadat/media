@@ -11,7 +11,7 @@ import {
   lastSeenText,
   toast,
 } from "../../utils/client";
-import { Avatar, Button, Input } from "../common/Ui";
+import { Avatar, Button, Input, Modal } from "../common/Ui";
 import { Icon } from "../common/Icon";
 import VoicePanel from "../voice/VoicePanel";
 import AuthedImage from "../common/AuthedImage";
@@ -59,6 +59,9 @@ export default function ChatView({
   const [dragOver, setDragOver] = useState(false);
   const [lightbox, setLightbox] = useState(null);
   const [addUser, setAddUser] = useState("");
+  const [addModalOpen, setAddModalOpen] = useState(false);
+  const [pickedMembers, setPickedMembers] = useState([]);
+  const [addingBatch, setAddingBatch] = useState(false);
   /** multi-select mode: pick several messages and delete them together */
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState(new Set());
@@ -552,6 +555,7 @@ export default function ChatView({
     if (m.content && m.type !== "deleted") items.push({ type: "item", key: "copy", label: "کپی متن پیام", icon: "copy", onClick: () => { void navigator.clipboard?.writeText(m.content || "").then(() => toast("متن پیام کپی شد", "success")).catch(() => toast("کپی انجام نشد", "error")); } });
     if (m.fileId && m.type === "image") items.push({ type: "item", key: "view", label: "نمایش تصویر", icon: "image", onClick: () => setLightbox(m.fileId) });
     if (m.fileId) items.push({ type: "item", key: "dl", label: "دانلود فایل", icon: "download", onClick: () => void downloadAuthed(`/api/files/${m.fileId}?download=1`, m.fileName || "file").catch((e) => toast(e.message, "error")) });
+    if (m.sender && onOpenProfile) items.push({ type: "item", key: "profile", label: "مشاهده پروفایل", icon: "user", onClick: () => m.sender && onOpenProfile(m.sender.id) });
     if (!mine && m.sender) items.push({ type: "item", key: "pm", label: `پیام خصوصی به ${m.sender.displayName}`, icon: "chat", onClick: () => m.sender && onOpenDirect(m.sender.id) });
     items.push({ type: "divider" });
     items.push({
@@ -637,6 +641,28 @@ export default function ChatView({
     }
   }
 
+  async function addMembersBatch() {
+    const manual = addUser.trim().replace(/^@/, "");
+    const usernames = [...new Set([...pickedMembers, ...(manual ? [manual] : [])])];
+    if (!usernames.length) return;
+    setAddingBatch(true);
+    try {
+      const r = await apiFetch(`/api/conversations/${conversationId}/members`, {
+        method: "POST",
+        json: { usernames },
+      });
+      setPickedMembers([]);
+      setAddUser("");
+      setAddModalOpen(false);
+      toast(`${faNum(r.added?.length ?? usernames.length)} عضو به گفتگو اضافه شدند`, "success");
+      loadDetail();
+    } catch (e) {
+      toast(e.message, "error");
+    } finally {
+      setAddingBatch(false);
+    }
+  }
+
   async function manageMember(userId, action) {
     try {
       await apiFetch(`/api/conversations/${conversationId}/members`, { method: "PATCH", json: { userId, action } });
@@ -718,6 +744,12 @@ export default function ChatView({
             const items = [
               { type: "label", label: detail.name },
               { type: "item", key: "info", label: showInfo ? "بستن اطلاعات گفتگو" : "اطلاعات گفتگو و اعضا", icon: "info", onClick: () => { setShowVoice(false); setShowInfo((v) => !v); } },
+              ...(detail.type === "direct" && detail.peer && onOpenProfile
+                ? [{ type: "item", key: "profile", label: "مشاهده پروفایل", icon: "user", onClick: () => onOpenProfile(detail.peer.id) }]
+                : []),
+              ...(detail.type !== "direct" && detail.type !== "saved" && (detail.type === "room" || isMod)
+                ? [{ type: "item", key: "add-members", label: "افزودن عضو جدید…", icon: "user-plus", onClick: () => { setPickedMembers([]); setAddModalOpen(true); } }]
+                : []),
               { type: "item", key: "copy", label: "کپی نام", icon: "copy", onClick: () => { void navigator.clipboard?.writeText(detail.name).then(() => toast("نام کپی شد", "success")).catch(() => toast("کپی انجام نشد", "error")); } },
             ];
             if (detail.type !== "saved" && me.permissions.includes("voice.join")) items.push({ type: "item", key: "voice", label: "شروع تماس صوتی", icon: "phone", onClick: () => { setShowInfo(false); setShowVoice(true); } });
@@ -763,6 +795,16 @@ export default function ChatView({
                   <p className={`truncate text-xs ${subtitle === "آنلاین" ? "text-emerald-400" : "text-muted"}`}>{subtitle}</p>
                 )}
               </div>
+            </button>
+          )}
+          {detail && detail.type !== "direct" && detail.type !== "saved" && (detail.type === "room" || isMod) && (
+            <button
+              onClick={() => { setPickedMembers([]); setAddModalOpen(true); }}
+              title="افزودن عضو"
+              aria-label="افزودن عضو"
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-muted transition hover:bg-surface-2 hover:text-accent"
+            >
+              <Icon name="user-plus" size={18} />
             </button>
           )}
           {detail && detail.type !== "saved" && me.permissions.includes("voice.join") && (
@@ -881,6 +923,7 @@ export default function ChatView({
                             }
                             if (imageIds.length && m.type === "image") items.push({ type: "item", key: "view", label: imageIds.length > 1 ? `نمایش تصاویر (${faNum(imageIds.length)})` : "نمایش تصویر", icon: "image", onClick: () => setLightbox({ ids: imageIds, index: 0 }) });
                             if (m.fileId) items.push({ type: "item", key: "dl", label: "دانلود فایل", icon: "download", onClick: () => void downloadAuthed(`/api/files/${m.fileId}?download=1`, m.fileName || "file").catch((e) => toast(e.message, "error")) });
+                            if (m.sender && onOpenProfile) items.push({ type: "item", key: "profile", label: "مشاهده پروفایل", icon: "user", onClick: () => m.sender && onOpenProfile(m.sender.id) });
                             if (!mine && m.sender) items.push({ type: "item", key: "pm", label: `پیام خصوصی به ${m.sender.displayName}`, icon: "chat", onClick: () => m.sender && onOpenDirect(m.sender.id) });
                             items.push({ type: "divider" });
                             items.push({ type: "item", key: "select", label: selectMode ? "خروج از حالت انتخاب" : "انتخاب پیام‌ها", icon: "check", onClick: () => {
@@ -1258,7 +1301,16 @@ export default function ChatView({
               <>
                 {(detail.type === "room" || isMod) && (
                   <div className="space-y-2">
-                    <p className="text-xs font-semibold text-muted">افزودن عضو با نام کاربری</p>
+                    <div className="flex items-center justify-between">
+                      <p className="text-xs font-semibold text-muted">افزودن عضو</p>
+                      <button
+                        type="button"
+                        onClick={() => { setPickedMembers([]); setAddModalOpen(true); }}
+                        className="flex items-center gap-1 text-[11px] font-bold text-accent hover:underline"
+                      >
+                        <Icon name="user-plus" size={13} /> انتخاب چندتایی دوستان
+                      </button>
+                    </div>
                     <div className="flex gap-2">
                       <Input dir="ltr" placeholder="@username" value={addUser} onChange={(e) => setAddUser(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addMember(addUser)} />
                       <Button onClick={() => addMember(addUser)} className="shrink-0">
@@ -1292,10 +1344,12 @@ export default function ChatView({
                             { type: "label", label: `${m.displayName}${m.id === me.id ? " (شما)" : ""} · ${ROLE_LABEL[m.role] ?? "عضو"}` },
                           ];
                           if (m.id === me.id) {
+                            if (onOpenProfile) items.push({ type: "item", key: "profile", label: "مشاهده پروفایل", icon: "user", onClick: () => onOpenProfile(m.id) });
                             items.push({ type: "item", key: "copyme", label: "کپی نام کاربری من", icon: "copy", onClick: () => { void navigator.clipboard?.writeText(`@${m.username}`).then(() => toast("کپی شد", "success")).catch(() => toast("کپی انجام نشد", "error")); } });
                             openMenu(event, items);
                             return;
                           }
+                          if (onOpenProfile) items.push({ type: "item", key: "profile", label: "مشاهده پروفایل", icon: "user", onClick: () => onOpenProfile(m.id) });
                           items.push({ type: "item", key: "msg", label: "پیام خصوصی", icon: "chat", onClick: () => onOpenDirect(m.id) });
                           items.push({ type: "item", key: "copy", label: "کپی نام کاربری", icon: "copy", onClick: () => { void navigator.clipboard?.writeText(`@${m.username}`).then(() => toast("کپی شد", "success")).catch(() => toast("کپی انجام نشد", "error")); } });
                           const canManageRoles = detail?.type !== "direct" && (myRole === "owner" || me.permissions.includes("rooms.manage")) && m.role !== "owner";
@@ -1381,8 +1435,69 @@ export default function ChatView({
           me={me}
           onClose={() => setShowVoice(false)}
           onOpenDirect={onOpenDirect}
+          onOpenProfile={onOpenProfile}
         />
       )}
+
+      <Modal open={addModalOpen} onClose={() => setAddModalOpen(false)} title={`افزودن عضو به «${detail?.name ?? "گروه"}»`}>
+        <div className="space-y-4">
+          <div>
+            <label className="mb-1.5 block text-xs font-bold text-muted">نام کاربری (اختیاری)</label>
+            <Input
+              dir="ltr"
+              placeholder="@username"
+              value={addUser}
+              onChange={(e) => setAddUser(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !addingBatch) void addMembersBatch();
+              }}
+            />
+          </div>
+          {invitable.length > 0 ? (
+            <div>
+              <p className="mb-2 text-xs font-bold text-muted">انتخاب از فهرست دوستان ({faNum(pickedMembers.length)} انتخاب‌شده)</p>
+              <div className="scroll-thin max-h-60 space-y-1.5 overflow-y-auto rounded-xl border border-line bg-surface/60 p-2">
+                {invitable.map((f) => {
+                  const on = pickedMembers.includes(f.user.username);
+                  return (
+                    <button
+                      key={f.id}
+                      type="button"
+                      onClick={() => setPickedMembers((prev) => (on ? prev.filter((u) => u !== f.user.username) : [...prev, f.user.username]))}
+                      className={`flex w-full items-center gap-3 rounded-lg border p-2 text-right transition ${
+                        on ? "border-accent bg-accent/15" : "border-transparent bg-surface-2 hover:border-line"
+                      }`}
+                    >
+                      <Avatar name={f.user.displayName} color={f.user.avatarColor} size={36} userId={f.user.id} avatarFileId={f.user.avatarFileId} />
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-bold">{f.user.displayName}</p>
+                        <p className="truncate text-xs text-muted" dir="ltr">@{f.user.username}</p>
+                      </div>
+                      <span className={`flex h-5 w-5 items-center justify-center rounded-md border ${on ? "border-accent bg-accent text-on-accent" : "border-line bg-surface"}`}>
+                        {on && <Icon name="check" size={12} strokeWidth={3} />}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ) : (
+            <p className="rounded-xl bg-surface-2 p-3 text-center text-xs text-muted">
+              همهٔ دوستان فعلی شما عضو این گفتگو هستند؛ می‌توانید با وارد کردن نام کاربری افراد جدید را اضافه کنید.
+            </p>
+          )}
+          <div className="flex gap-2 pt-1">
+            <Button variant="ghost" onClick={() => setAddModalOpen(false)} className="flex-1">انصراف</Button>
+            <Button
+              onClick={() => void addMembersBatch()}
+              disabled={addingBatch || (!pickedMembers.length && !addUser.trim())}
+              className="flex-1"
+            >
+              {addingBatch ? "در حال افزودن…" : "افزودن اعضا"}
+            </Button>
+          </div>
+        </div>
+      </Modal>
 
       <ContextMenu state={menu} onClose={closeMenu} />
 

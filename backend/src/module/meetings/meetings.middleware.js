@@ -47,6 +47,11 @@ export const validateMeetingAction = (req) => {
   let input;
   if (["leave", "heartbeat"].includes(action)) {
     input = { action, joinToken };
+  } else if (action === "audio-chunk") {
+    const data = text(req.body.data, 120_000);
+    const mime = text(req.body.mime, 80);
+    if (!data) throw new HttpError(400, "دادهٔ صوتی خالی است");
+    input = { action, joinToken, data, mime };
   } else if (["admit", "kick", "mute", "unmute", "block-share", "allow-share"].includes(action)) {
     const target = text(req.body.target, 100);
     if (!target) throw new HttpError(400, "شرکت‌کنندهٔ هدف مشخص نیست");

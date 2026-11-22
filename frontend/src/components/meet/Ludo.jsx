@@ -84,12 +84,10 @@ function tokenRC(seat, slot, step) {
 function legalTokens(tokens, seat, dice) {
   if (!dice) return new Set();
   const mine = tokens[seat] ?? [];
-  const occupied = new Set(mine.filter((s) => s >= 0 && s < 56));
   const out = new Set();
   mine.forEach((pos, idx) => {
     const to = pos === -1 ? (dice === 6 ? 0 : -99) : pos + dice;
     if (to < 0 || to > 56) return;
-    if (to < 56 && occupied.has(to)) return;
     out.add(idx);
   });
   return out;

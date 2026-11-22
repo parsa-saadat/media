@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { apiFetch, toast } from "../utils/client";
+import { apiFetch, getToken, toast } from "../utils/client";
 import { createSpeakingDetector, emitMicLevel } from "../utils/micMeter";
+import { createRelayAudioPlayer, createRelayAudioSender } from "../utils/liveAudioRelay";
 
 const DEFAULT_PREFS = { inputId: "", outputId: "", master: 100, micGain: 100, volumes: {} };
 
@@ -42,6 +43,9 @@ export function useVoiceRoom(conversationId, me) {
   const restrictionsRef = useRef(restrictions);
   const joinedRef = useRef("");
   const cursorRef = useRef(0);
+  const audioCursorRef = useRef(0);
+  const relayPlayerRef = useRef(null);
+  const relaySenderRef = useRef(null);
   const peersRef = useRef(new Map());
   const participantsRef = useRef([]);
   const streamRef = useRef(null);
@@ -103,6 +107,9 @@ export function useVoiceRoom(conversationId, me) {
     for (const [userId, peer] of peersRef.current) if (peer.audio) {
       peer.audio.volume = effectiveVolume(userId);
       void setAudioOutput(peer.audio);
+    }
+    for (const p of participantsRef.current) {
+      relayPlayerRef.current?.setPeerVolume(String(p.userId), effectiveVolume(p.userId));
     }
   }, [effectiveVolume, setAudioOutput]);
 
@@ -266,8 +273,10 @@ export function useVoiceRoom(conversationId, me) {
     const pc = new RTCPeerConnection({ iceServers: [
       { urls: "stun:stun.l.google.com:19302" },
       { urls: "stun:stun1.l.google.com:19302" },
+      { urls: "stun:stun.cloudflare.com:3478" },
     ] });
-    const polite = String(me.id) > String(user.userId);
+    // Numerical comparison so user IDs like 2 vs 10 never suffer string lexicographical bugs!
+    const polite = Number(me.id) > Number(user.userId);
     const peer = {
       pc,
       polite,
@@ -420,9 +429,10 @@ export function useVoiceRoom(conversationId, me) {
     const myJoin = joinedRef.current;
     busyPoll.current = true;
     try {
-      const data = await apiFetch(`/api/voice/${conversationId}?after=${cursorRef.current}`);
+      const data = await apiFetch(`/api/voice/${conversationId}?after=${cursorRef.current}&afterAudio=${audioCursorRef.current}`);
       if (!alive.current || joinedRef.current !== myJoin) return;
       cursorRef.current = data.cursor;
+      if (typeof data.audioCursor === "number") audioCursorRef.current = data.audioCursor;
       participantsRef.current = data.participants;
       setParticipants(data.participants);
       setTracks(data.tracks);
@@ -463,8 +473,21 @@ export function useVoiceRoom(conversationId, me) {
       for (const signal of data.signals) await handleSignal(signal, data.participants);
       if (typeof RTCPeerConnection !== "undefined") {
         for (const participant of data.participants) {
-          if (participant.userId === me.id || String(me.id) > String(participant.userId) || peersRef.current.has(participant.userId)) continue;
+          if (participant.userId === me.id || Number(me.id) > Number(participant.userId) || peersRef.current.has(participant.userId)) continue;
           createPeer(participant, true);
+        }
+      }
+      // Play relayed audio chunks ONLY for peers whose direct WebRTC P2P ICE is NOT yet connected!
+      if (Array.isArray(data.audioChunks) && data.audioChunks.length > 0) {
+        if (!relayPlayerRef.current) relayPlayerRef.current = createRelayAudioPlayer();
+        for (const chunk of data.audioChunks) {
+          const peer = peersRef.current.get(chunk.fromUserId);
+          const p2pConnected = peer?.pc?.connectionState === "connected" || peer?.pc?.iceConnectionState === "connected";
+          if (p2pConnected) continue;
+          const vol = effectiveVolume(chunk.fromUserId);
+          if (vol > 0) {
+            void relayPlayerRef.current.playChunk(String(chunk.fromUserId), chunk.data, chunk.mime, vol);
+          }
         }
       }
     } catch (err) {
@@ -566,6 +589,10 @@ export function useVoiceRoom(conversationId, me) {
       alive.current = false;
       const token = joinedRef.current;
       joinedRef.current = "";
+      relaySenderRef.current?.stop();
+      relaySenderRef.current = null;
+      relayPlayerRef.current?.destroy();
+      relayPlayerRef.current = null;
       streamRef.current?.getTracks().forEach((t) => t.stop());
       trackRef.current?.stop();
       screenStream.current?.getTracks().forEach((t) => t.stop());
@@ -582,6 +609,28 @@ export function useVoiceRoom(conversationId, me) {
 
   useEffect(() => {
     if (status !== "joined") return;
+    if (!relayPlayerRef.current) relayPlayerRef.current = createRelayAudioPlayer();
+    const sender = createRelayAudioSender({
+      getTrack: () => (micOnRef.current ? trackRef.current : null),
+      shouldSend: () => {
+        if (!joinedRef.current || !micOnRef.current || restrictionsRef.current.micMuted) return false;
+        const others = participantsRef.current.filter((p) => p.userId !== me.id);
+        if (!others.length) return false;
+        // Send relayed audio whenever at least one peer is NOT connected via direct P2P WebRTC!
+        return others.some((p) => {
+          const peer = peersRef.current.get(p.userId);
+          return !(peer?.pc?.connectionState === "connected" || peer?.pc?.iceConnectionState === "connected");
+        });
+      },
+      onChunk: (data, mime) => {
+        if (!joinedRef.current) return;
+        void send({ action: "audio-chunk", joinToken: joinedRef.current, data, mime }).catch(() => {});
+      },
+      sliceMs: 420,
+    });
+    relaySenderRef.current = sender;
+    sender.start();
+
     let bc = null;
     if (typeof BroadcastChannel !== "undefined") {
       try {
@@ -603,25 +652,48 @@ export function useVoiceRoom(conversationId, me) {
     }
     const unlock = () => {
       if (contextRef.current?.state === "suspended") void contextRef.current.resume().catch(() => {});
+      relayPlayerRef.current?.resume();
       for (const peer of peersRef.current.values()) {
         if (peer.audio && peer.audio.paused) void peer.audio.play().catch(() => {});
       }
     };
+    const onTabClose = () => {
+      // Note: on refresh we keep sessionStorage joinToken so same tab reconnects immediately;
+      // if tab is closed completely, sessionStorage dies with it and VOICE_TIMEOUT_MS cleans up in 12s.
+      const jt = joinedRef.current;
+      const auth = getToken();
+      if (!jt || document.visibilityState === "visible") return;
+      void fetch(`/api/voice/${conversationId}${auth ? `?token=${encodeURIComponent(auth)}` : ""}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(auth ? { Authorization: `Bearer ${auth}`, "x-voxsy-token": auth } : {}),
+        },
+        body: JSON.stringify({ action: "heartbeat", joinToken: jt }),
+        keepalive: true,
+        credentials: "same-origin",
+      }).catch(() => {});
+    };
     document.addEventListener("pointerdown", unlock, { passive: true });
     document.addEventListener("keydown", unlock, { passive: true });
+    window.addEventListener("pagehide", onTabClose);
     void poll();
-    const ticker = setInterval(() => void poll(), 1400);
+    // Poll every 450ms so relayed audio & signals arrive with sub-second conversational latency
+    const ticker = setInterval(() => void poll(), 450);
     const heartbeat = setInterval(() => {
       if (joinedRef.current) void send({ action: "heartbeat", joinToken: joinedRef.current }).catch(() => {});
-    }, 5000);
+    }, 4500);
     return () => {
+      sender.stop();
+      relaySenderRef.current = null;
       bc?.close();
       document.removeEventListener("pointerdown", unlock);
       document.removeEventListener("keydown", unlock);
+      window.removeEventListener("pagehide", onTabClose);
       clearInterval(ticker);
       clearInterval(heartbeat);
     };
-  }, [closePeer, conversationId, poll, send, status, stopMic]);
+  }, [closePeer, conversationId, me.id, poll, send, status, stopMic]);
 
   /** Lobby: open the microphone before joining so the user can see the level meter and pick a device. */
   const previewMic = useCallback(async () => {
@@ -664,6 +736,7 @@ export function useVoiceRoom(conversationId, me) {
       joinedRef.current = data.joinToken;
       try { sessionStorage.setItem(`inebuly-voice-token:${conversationId}`, data.joinToken); } catch {}
       cursorRef.current = data.cursor;
+      if (typeof data.audioCursor === "number") audioCursorRef.current = data.audioCursor;
       participantsRef.current = data.participants;
       setParticipants(data.participants);
       setTracks(data.tracks);

@@ -2,7 +2,14 @@ import { positiveInt } from "../../utils/validators/input.validator.js";
 import * as voiceService from "./voice.service.js";
 
 export const snapshot = async (req, res) => {
-  res.json(await voiceService.getSnapshot(req.me, req.id(), positiveInt(req.query.get("after"))));
+  res.json(
+    await voiceService.getSnapshot(
+      req.me,
+      req.id(),
+      positiveInt(req.query.get("after")),
+      positiveInt(req.query.get("afterAudio")),
+    ),
+  );
 };
 
 export const action = async (req, res) => {
@@ -17,6 +24,9 @@ export const action = async (req, res) => {
       break;
     case "heartbeat":
       await voiceService.heartbeat(req.me, chatId, input.joinToken);
+      break;
+    case "audio-chunk":
+      await voiceService.relayAudio(req.me, chatId, input);
       break;
     case "mic":
       await voiceService.setMic(req.me, chatId, input.joinToken, input.on);

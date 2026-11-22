@@ -10,6 +10,7 @@ import { ContextMenu, useContextMenu } from "../components/common/ContextMenu";
 import { useConfirm } from "../components/common/Confirm";
 import { MicMeter, subscribeMicLevel } from "../utils/micMeter";
 import GamesPanel from "../components/meet/GamesPanel";
+import UserProfileModal from "../components/profile/UserProfileModal";
 
 const RESOLUTIONS = [
   { id: "480p", label: "۴۸۰p", hint: "سبک — اینترنت ضعیف" },
@@ -124,7 +125,7 @@ function MediaPopover({ open, title, quality, fps, onPick, onClose, active, onSt
  * /meet/:token — Stand-alone meeting supporting simultaneous camera + screen share,
  * switchable stage focus, PiP presenter camera overlay, and adaptive participant grid.
  */
-export default function Meet({ token }) {
+export default function Meet({ token, minimized = false, onMinimize, onExpand, onTerminated }) {
   const session = useSession();
   const me = session.user;
   const { confirm } = useConfirm();
@@ -151,10 +152,46 @@ export default function Meet({ token }) {
   const [picked, setPicked] = useState([]);
   const [inviting, setInviting] = useState(false);
   const [invitedNames, setInvitedNames] = useState([]);
+  const [viewProfileId, setViewProfileId] = useState(null);
+  const [roomFs, setRoomFs] = useState(false);
+  const [streamFs, setStreamFs] = useState(false);
   const linkRef = useRef(null);
   const inviteRef = useRef(null);
   const cameraRef = useRef(null);
   const shareRef = useRef(null);
+  const rootFsRef = useRef(null);
+  const streamFsRef = useRef(null);
+
+  useEffect(() => {
+    const onFs = () => {
+      const el = document.fullscreenElement;
+      setRoomFs(Boolean(el && el === rootFsRef.current));
+      setStreamFs(Boolean(el && el === streamFsRef.current));
+    };
+    document.addEventListener("fullscreenchange", onFs);
+    return () => document.removeEventListener("fullscreenchange", onFs);
+  }, []);
+
+  async function toggleFullscreen(targetEl) {
+    if (!targetEl) return;
+    try {
+      if (document.fullscreenElement === targetEl) {
+        await document.exitFullscreen();
+      } else {
+        if (document.fullscreenElement) await document.exitFullscreen();
+        await targetEl.requestFullscreen();
+      }
+    } catch {
+      toast("مرورگر اجازهٔ تمام‌صفحه نداد", "error");
+    }
+  }
+
+  // If minimized while not joined/lobby (e.g. session ended or left), clean up activeMeetToken
+  useEffect(() => {
+    if (minimized && meeting.phase === "idle") {
+      onTerminated?.();
+    }
+  }, [minimized, meeting.phase, onTerminated]);
 
   useEffect(() => {
     let alive = true;
@@ -185,7 +222,7 @@ export default function Meet({ token }) {
 
   // Mic preview while waiting to join
   useEffect(() => {
-    if (meeting.phase !== "idle" || notFound) return;
+    if (minimized || meeting.phase !== "idle" || notFound) return;
     let cancelled = false;
     setMicPreview("checking");
     void meeting.previewMic().then((ok) => {
@@ -195,7 +232,7 @@ export default function Meet({ token }) {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [meeting.phase, notFound]);
+  }, [minimized, meeting.phase, notFound]);
 
   useEffect(() => {
     if (meeting.phase === "joined" && !joinedAt) setJoinedAt(Date.now());
@@ -379,8 +416,10 @@ export default function Meet({ token }) {
     if (!ok) return;
     try {
       await apiFetch(`/api/meetings/${token}/end`, { method: "POST" });
+      await meeting.leave();
+      onTerminated?.();
       toast("جلسه پایان یافت", "success");
-      navigate("/");
+      navigate(me ? "/" : "/login");
     } catch (e) {
       toast(e.message, "error");
     }
@@ -398,7 +437,14 @@ export default function Meet({ token }) {
     });
     if (!ok) return;
     await meeting.leave();
-    navigate("/");
+    onTerminated?.();
+    navigate(me ? "/" : "/login");
+  }
+
+  function minimizeToApp() {
+    if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
+    if (onMinimize) onMinimize();
+    else navigate(me ? "/" : "/login");
   }
 
   function personMenu(p) {
@@ -406,6 +452,16 @@ export default function Meet({ token }) {
     const vol = meeting.prefs.volumes[p.joinToken] ?? 100;
     const s = getParticipantStreams(p);
     const items = [{ label: `${p.name}${p.isHost ? " · میزبان" : ""}${p.isGuest ? " · مهمان" : ""}`, type: "label" }];
+
+    if (p.userId && me) {
+      items.push({
+        type: "item",
+        key: "profile",
+        label: "مشاهده پروفایل",
+        icon: "user",
+        onClick: () => setViewProfileId(p.userId),
+      });
+    }
 
     if (p.cameraOn || s.camera) {
       const isCamPinned = stage?.who.joinToken === p.joinToken && stage?.kind === "camera";
@@ -525,13 +581,91 @@ export default function Meet({ token }) {
     return items;
   }
 
+  if (minimized) {
+    if (meeting.phase !== "joined" && meeting.phase !== "lobby") return null;
+    const miniVideoStream = stage?.stream ?? (meeting.sharing ? meeting.localScreen : meeting.cameraOn ? meeting.localCamera : null);
+    return (
+      <div
+        dir="rtl"
+        className="fixed bottom-4 end-4 z-50 flex w-[min(23.5rem,calc(100vw-2rem))] flex-col overflow-hidden rounded-2xl border border-accent/40 bg-[#12161d]/95 text-white shadow-[0_20px_50px_rgba(0,0,0,.78)] backdrop-blur-xl"
+      >
+        {miniVideoStream && (
+          <div
+            onClick={() => (onExpand ? onExpand() : navigate(`/meet/${token}`))}
+            className="relative h-36 w-full cursor-pointer overflow-hidden border-b border-white/10 bg-black"
+          >
+            <Stage
+              stream={miniVideoStream}
+              name={stage?.who?.name ?? "شما"}
+              kind={stage?.kind ?? "screen"}
+              mirrored={Boolean(stage?.kind === "camera" && stage?.who?.joinToken === meeting.joinToken)}
+            />
+            <span className="absolute start-2 top-2 rounded-md bg-black/65 px-2 py-0.5 text-[10px] font-bold text-white backdrop-blur">
+              برای بازگشت به جلسه کلیک کنید
+            </span>
+          </div>
+        )}
+        <div className="flex items-center gap-2.5 p-2.5">
+          <button
+            type="button"
+            onClick={() => (onExpand ? onExpand() : navigate(`/meet/${token}`))}
+            title="بازگشت به صفحهٔ کامل جلسه"
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-accent/20 text-accent ring-1 ring-accent/35 transition hover:bg-accent/30"
+          >
+            <Icon name="radio" size={18} />
+          </button>
+          <div
+            onClick={() => (onExpand ? onExpand() : navigate(`/meet/${token}`))}
+            className="min-w-0 flex-1 cursor-pointer select-none"
+          >
+            <p className="truncate text-xs font-black text-white">{info?.title ?? "جلسهٔ فعال"}</p>
+            <p className="flex items-center gap-1.5 text-[10px] text-emerald-300">
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+              <span>{meeting.phase === "lobby" ? "در انتظار تأیید لابی" : `${faNum(inCall.length)} نفر در جلسه`}</span>
+              {joinedAt > 0 && <span dir="ltr" className="text-white/60">· <Elapsed since={joinedAt} /></span>}
+            </p>
+          </div>
+          {meeting.phase === "joined" && (
+            <button
+              type="button"
+              disabled={meeting.myState.micMuted}
+              onClick={() => void meeting.toggleMic()}
+              title={meeting.micOn ? "خاموش کردن میکروفون" : "روشن کردن میکروفون"}
+              className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl transition disabled:opacity-40 ${
+                meeting.micOn ? "bg-emerald-500 text-[#072316]" : "bg-[#ea4335] text-white"
+              }`}
+            >
+              <Icon name={meeting.micOn ? "mic" : "mic-off"} size={16} />
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => (onExpand ? onExpand() : navigate(`/meet/${token}`))}
+            title="باز کردن کامل جلسه"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-white/10 text-white hover:bg-white/20"
+          >
+            <Icon name="maximize" size={15} />
+          </button>
+          <button
+            type="button"
+            onClick={() => void meeting.leave().then(() => onTerminated?.())}
+            title="خروج از جلسه"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-rose-500/90 text-white hover:bg-rose-500"
+          >
+            <Icon name="phone-off" size={15} />
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   if (notFound) {
     return (
       <div className="flex min-h-[100dvh] flex-col items-center justify-center gap-4 bg-bg p-6 text-center text-fg">
         <span className="flex h-14 w-14 items-center justify-center rounded-xl bg-surface-2 text-rose-400"><Icon name="ban" size={28} /></span>
         <h1 className="text-xl font-black">جلسه در دسترس نیست</h1>
         <p className="max-w-sm text-sm leading-7 text-muted">{notFound}</p>
-        <button onClick={() => navigate(me ? "/" : "/login")} className="rounded-lg bg-surface-2 px-5 py-2.5 text-sm font-bold text-fg hover:bg-surface-3">بازگشت</button>
+        <button onClick={() => { onTerminated?.(); navigate(me ? "/" : "/login"); }} className="rounded-lg bg-surface-2 px-5 py-2.5 text-sm font-bold text-fg hover:bg-surface-3">بازگشت</button>
       </div>
     );
   }
@@ -547,7 +681,7 @@ export default function Meet({ token }) {
             <p className="truncate text-sm font-bold">{info?.title ?? "جلسه"}</p>
             <p className="truncate text-[11px] text-muted" dir="ltr">inebuly · /meet/{token}</p>
           </div>
-          <button onClick={() => navigate(me ? "/" : "/login")} aria-label="بازگشت" className="ms-auto flex h-9 w-9 items-center justify-center rounded-lg text-muted hover:bg-surface-2 hover:text-fg"><Icon name="close" size={17} /></button>
+          <button onClick={() => { onTerminated?.(); navigate(me ? "/" : "/login"); }} aria-label="بازگشت" className="ms-auto flex h-9 w-9 items-center justify-center rounded-lg text-muted hover:bg-surface-2 hover:text-fg"><Icon name="close" size={17} /></button>
         </div>
 
         <div className="mx-auto grid w-full max-w-5xl flex-1 grid-cols-1 items-center gap-8 px-4 py-6 sm:px-6 lg:grid-cols-[1.2fr_1fr]">
@@ -672,7 +806,7 @@ export default function Meet({ token }) {
                     {meeting.phase === "connecting" ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-on-accent/40 border-t-on-accent" /> : <Icon name="phone" size={18} />}
                     {meeting.phase === "connecting" ? "در حال ورود…" : "پیوستن به جلسه"}
                   </button>
-                  <button onClick={() => navigate(me ? "/" : "/login")} className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-line bg-surface-2 px-6 py-3 text-sm font-bold text-fg hover:bg-surface-3">
+                  <button onClick={() => { onTerminated?.(); navigate(me ? "/" : "/login"); }} className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-line bg-surface-2 px-6 py-3 text-sm font-bold text-fg hover:bg-surface-3">
                     بازگشت
                   </button>
                 </div>
@@ -686,7 +820,7 @@ export default function Meet({ token }) {
 
   /* ── in the meeting ── */
   return (
-    <div className="anim-surface-in fixed inset-0 z-40 flex flex-col overflow-hidden bg-bg text-fg">
+    <div ref={rootFsRef} className="anim-surface-in fixed inset-0 z-40 flex flex-col overflow-hidden bg-bg text-fg">
       {/* Header */}
       <header className="relative z-30 flex shrink-0 items-center gap-3 border-b border-line bg-surface px-3 py-2 sm:px-5">
         <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-accent/10 text-accent"><Icon name="radio" size={18} /></span>
@@ -729,6 +863,27 @@ export default function Meet({ token }) {
             </button>
           )}
           <span className="rounded-lg bg-surface-2 px-2.5 py-1 text-[11px] font-semibold text-muted">{faNum(inCall.length)} نفر</span>
+
+          <button
+            type="button"
+            onClick={() => minimizeToApp()}
+            aria-label="ورود به برنامه (کوچک‌کردن جلسه)"
+            title="ورود به فضای چت و برنامه بدون قطع شدن جلسه"
+            className="press flex h-9 items-center gap-1.5 rounded-lg border border-line bg-surface-2 px-2.5 text-[11px] font-bold text-fg transition hover:border-accent/50 hover:bg-surface-3"
+          >
+            <Icon name="pip" size={15} className="text-accent" />
+            <span className="hidden sm:inline">فضای برنامه</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => void toggleFullscreen(rootFsRef.current)}
+            aria-label={roomFs ? "خروج از تمام‌صفحه" : "تمام‌صفحهٔ جلسه"}
+            title={roomFs ? "خروج از تمام‌صفحه" : "تمام‌صفحه کردن کل جلسه"}
+            className="press flex h-9 w-9 items-center justify-center rounded-lg border border-line bg-surface-2 text-muted transition hover:bg-surface-3 hover:text-fg"
+          >
+            <Icon name={roomFs ? "minimize" : "maximize"} size={15} />
+          </button>
 
           <div className="relative" ref={linkRef}>
             <button
@@ -885,7 +1040,7 @@ export default function Meet({ token }) {
         <main className={`flex min-w-0 flex-1 gap-2.5 p-2.5 sm:p-3.5 ${stage ? "flex-col lg:flex-row" : "flex-col"}`}>
           {/* Stage: Shared Screen or Pinned Camera */}
           {stage && (
-            <div className="relative flex min-h-[240px] flex-1 items-center justify-center overflow-hidden rounded-xl border border-line bg-[#090b10] shadow-xl">
+            <div ref={streamFsRef} className="relative flex min-h-[240px] flex-1 items-center justify-center overflow-hidden rounded-xl border border-line bg-[#090b10] shadow-xl">
               <Stage
                 stream={stage.stream}
                 name={stage.who.name}
@@ -903,7 +1058,17 @@ export default function Meet({ token }) {
                 </span>
                 <span className="pointer-events-auto flex items-center gap-1.5">
                   <button
+                    type="button"
+                    onClick={() => void toggleFullscreen(streamFsRef.current)}
+                    className="flex items-center gap-1 rounded-md bg-black/60 px-2.5 py-1 text-[11px] font-semibold text-white backdrop-blur hover:bg-black/85"
+                    title={streamFs ? "خروج از تمام‌صفحهٔ استریم" : "تمام‌صفحه کردن استریم"}
+                  >
+                    <Icon name={streamFs ? "minimize" : "maximize"} size={13} />
+                    <span>{streamFs ? "کوچک‌نمایی" : "تمام‌صفحه استریم"}</span>
+                  </button>
+                  <button
                     onClick={() => {
+                      if (document.fullscreenElement === streamFsRef.current) void document.exitFullscreen().catch(() => {});
                       setStageTarget(null);
                       if (stage.kind === "screen") setStageMinimized(true);
                     }}
@@ -1021,6 +1186,7 @@ export default function Meet({ token }) {
                         color={p.avatarColor}
                         size={stage ? 52 : visibleParticipants.length <= 2 ? 96 : visibleParticipants.length <= 4 ? 76 : 60}
                         userId={p.userId ?? undefined}
+                        avatarFileId={p.avatarFileId ?? undefined}
                       />
                       {!stage && <p className="max-w-full truncate text-sm font-bold text-fg/90">{p.name}</p>}
                     </div>
@@ -1127,7 +1293,7 @@ export default function Meet({ token }) {
 
         {/* People Side Panel */}
         {panel === "people" && (
-          <aside className="anim-slide-panel flex w-80 shrink-0 flex-col border-s border-line bg-surface sm:w-96">
+          <aside className="anim-slide-panel fixed inset-0 z-30 flex flex-col bg-surface sm:static sm:w-96 sm:shrink-0 sm:border-s sm:border-line">
             <div className="flex shrink-0 items-center gap-2 border-b border-line p-2.5">
               <p className="flex-1 px-1.5 text-sm font-bold">افراد در جلسه ({faNum(inCall.length)})</p>
               <button onClick={() => setPanel(null)} aria-label="بستن" className="flex h-8 w-8 items-center justify-center rounded-lg text-muted hover:bg-surface-2 hover:text-fg"><Icon name="close" size={16} /></button>
@@ -1139,7 +1305,7 @@ export default function Meet({ token }) {
                   <div className="space-y-2">
                     {lobby.map((p) => (
                       <div key={p.joinToken} className="flex items-center gap-2">
-                        <Avatar name={p.name} color={p.avatarColor} size={32} />
+                        <Avatar name={p.name} color={p.avatarColor} size={32} userId={p.userId ?? undefined} avatarFileId={p.avatarFileId ?? undefined} />
                         <span className="min-w-0 flex-1 truncate text-xs font-semibold">
                           {p.name}
                           {p.isGuest && <span className="text-[10px] font-normal text-muted"> · مهمان</span>}
@@ -1157,7 +1323,7 @@ export default function Meet({ token }) {
                 const mine = p.joinToken === meeting.joinToken;
                 return (
                   <div key={p.joinToken} onContextMenu={(e) => open(e, personMenu(p))} className="flex items-center gap-2.5 rounded-xl border border-line bg-surface-2 p-2.5">
-                    <Avatar name={p.name} color={p.avatarColor} size={36} userId={p.userId ?? undefined} />
+                    <Avatar name={p.name} color={p.avatarColor} size={36} userId={p.userId ?? undefined} avatarFileId={p.avatarFileId ?? undefined} />
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-xs font-bold">
                         {p.name}
@@ -1211,7 +1377,7 @@ export default function Meet({ token }) {
         )}
 
         {panel === "games" && (
-          <aside className="anim-slide-panel flex w-80 shrink-0 flex-col border-s border-line bg-surface sm:w-96">
+          <aside className="anim-slide-panel fixed inset-0 z-30 flex flex-col bg-surface sm:static sm:w-96 sm:shrink-0 sm:border-s sm:border-line">
             <GamesPanel meeting={meeting} onClose={() => setPanel(null)} />
           </aside>
         )}
@@ -1298,6 +1464,12 @@ export default function Meet({ token }) {
         <Ctrl label="کپی لینک جلسه" onClick={() => void copyLink()}>
           <Icon name="link" size={19} />
         </Ctrl>
+        <Ctrl label="ورود به فضای برنامه (کوچک‌کردن جلسه)" onClick={() => minimizeToApp()} title="ورود به برنامه بدون قطع شدن جلسه">
+          <Icon name="pip" size={19} />
+        </Ctrl>
+        <Ctrl label={roomFs ? "خروج از تمام‌صفحه" : "تمام‌صفحه کردن جلسه"} tone={roomFs ? "warn" : "idle"} onClick={() => void toggleFullscreen(rootFsRef.current)}>
+          <Icon name={roomFs ? "minimize" : "maximize"} size={19} />
+        </Ctrl>
 
         <div className="mx-1 h-8 w-px bg-line" />
 
@@ -1332,6 +1504,17 @@ export default function Meet({ token }) {
       </footer>
 
       <ContextMenu state={menu} onClose={close} />
+      {viewProfileId && me && (
+        <UserProfileModal
+          userId={viewProfileId}
+          me={me}
+          onClose={() => setViewProfileId(null)}
+          onMessage={() => {
+            setViewProfileId(null);
+            minimizeToApp();
+          }}
+        />
+      )}
       {myRow?.micMuted && (
         <p className="pointer-events-none absolute bottom-20 left-1/2 -translate-x-1/2 rounded-lg bg-rose-500/90 px-4 py-1.5 text-xs font-bold text-white shadow-lg">
           میکروفون شما توسط میزبان بسته شده است

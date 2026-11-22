@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import Toaster from "./components/common/Toaster";
 import { Logo } from "./components/common/Ui";
 import Admin from "./pages/Admin";
@@ -31,9 +31,20 @@ function Splash() {
 function Screens({ initialPath }) {
   const path = usePath(initialPath);
   const { status } = useSession();
+  const [activeMeetToken, setActiveMeetToken] = useState(() => {
+    const p = typeof window !== "undefined" ? window.location.pathname : initialPath;
+    return PUBLIC_PATHS.test(p) ? p.slice("/meet/".length) : "";
+  });
 
   // Keep the address bar in step with the session, by changing the URL — never by loading a page.
   const isMeet = PUBLIC_PATHS.test(path);
+  const urlMeetToken = isMeet ? path.slice("/meet/".length) : "";
+
+  useEffect(() => {
+    if (urlMeetToken && urlMeetToken !== activeMeetToken) {
+      setActiveMeetToken(urlMeetToken);
+    }
+  }, [activeMeetToken, urlMeetToken]);
 
   useEffect(() => {
     if (isMeet) return; // guests are welcome on meeting links
@@ -64,13 +75,33 @@ function Screens({ initialPath }) {
     }
   }, [isMeet, path, status]);
 
-  if (isMeet) return <Meet token={path.slice("/meet/".length)} />;
-  if (status === "loading") return <Splash />;
-  if (status === "guest") return <PreAuth mode={path === "/register" ? "register" : "login"} />;
-  if (path === "/admin") return <Admin />;
-  if (path === "/istikhara") return <Istikhara />;
-  if (path === "/" || AUTH_PATHS.includes(path)) return <Chat />;
-  return <NotFound />;
+  let mainScreen = null;
+  if (!isMeet) {
+    if (status === "loading") mainScreen = <Splash />;
+    else if (status === "guest") mainScreen = <PreAuth mode={path === "/register" ? "register" : "login"} />;
+    else if (path === "/admin") mainScreen = <Admin />;
+    else if (path === "/istikhara") mainScreen = <Istikhara />;
+    else if (path === "/" || AUTH_PATHS.includes(path)) mainScreen = <Chat />;
+    else mainScreen = <NotFound />;
+  }
+
+  const showMeetToken = urlMeetToken || activeMeetToken;
+
+  return (
+    <>
+      {mainScreen}
+      {showMeetToken && (
+        <Meet
+          key={showMeetToken}
+          token={showMeetToken}
+          minimized={!isMeet}
+          onMinimize={() => navigate(status === "authed" ? "/" : "/login")}
+          onExpand={() => navigate(`/meet/${showMeetToken}`)}
+          onTerminated={() => setActiveMeetToken("")}
+        />
+      )}
+    </>
+  );
 }
 
 /** The whole frontend: one React tree, switched by the session and by the pathname. */

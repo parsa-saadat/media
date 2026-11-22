@@ -42,6 +42,7 @@ export function ConversationList({
   activeId,
   onOpen,
   onOpenSaved,
+  onOpenProfile,
   onCreate,
   me,
 }) {
@@ -157,6 +158,9 @@ export function ConversationList({
                 const items = [
                   { type: "label", label: `${c.name} · ${roleLabel}` },
                   { type: "item", key: "open", label: "باز کردن گفتگو", icon: "chat", onClick: () => onOpen(c.id) },
+                  ...(c.type === "direct" && c.peer && onOpenProfile
+                    ? [{ type: "item", key: "profile", label: "مشاهده پروفایل", icon: "user", onClick: () => onOpenProfile(c.peer.id) }]
+                    : []),
                   { type: "item", key: "copy", label: "کپی نام", icon: "copy", onClick: () => { void navigator.clipboard?.writeText(c.name).then(() => toast("نام کپی شد", "success")).catch(() => toast("کپی انجام نشد", "error")); } },
                 ];
                 if (c.type === "room" || c.type === "group") {

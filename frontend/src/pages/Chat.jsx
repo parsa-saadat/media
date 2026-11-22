@@ -54,6 +54,7 @@ export default function Chat() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [viewProfileId, setViewProfileId] = useState(null);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
   const { confirm } = useConfirm();
   const { menu, open: openMenu, close: closeMenu } = useContextMenu();
@@ -208,6 +209,62 @@ export default function Chat() {
 
   return (
     <div className="bg-aurora flex h-[100dvh] flex-col overflow-hidden">
+      {/* Mobile Top Bar (shown whenever browsing lists on mobile < md) */}
+      {!activeId && (
+        <header className="flex shrink-0 items-center justify-between gap-2.5 border-b border-line bg-surface/85 px-3.5 py-2.5 backdrop-blur md:hidden">
+          <button
+            type="button"
+            onClick={() => setMobileMenuOpen(true)}
+            aria-label="منوی اصلی و تنظیمات"
+            className="press flex items-center gap-2.5 rounded-xl border border-line bg-surface-2/80 py-1 pl-3 pr-1.5 text-right transition hover:bg-surface-3"
+          >
+            <Avatar
+              name={me.displayName}
+              color={me.avatarColor}
+              size={32}
+              userId={me.id}
+              avatarFileId={me.avatarFileId}
+              status={toPresence(me.status)}
+            />
+            <div className="min-w-0">
+              <p className="max-w-[115px] truncate text-xs font-black text-fg">{me.displayName}</p>
+              <p className="text-[10px] font-semibold text-accent">منو و تنظیمات</p>
+            </div>
+          </button>
+
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => void openDirect({ saved: true })}
+              title="پیام‌های ذخیره‌شده"
+              aria-label="پیام‌های ذخیره‌شده"
+              className="press flex h-9 w-9 items-center justify-center rounded-xl bg-surface-2 text-muted transition hover:bg-surface-3 hover:text-accent"
+            >
+              <Icon name="bookmark" size={18} />
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate("/istikhara")}
+              title="استخاره با قرآن"
+              aria-label="استخاره با قرآن"
+              className="press flex h-9 w-9 items-center justify-center rounded-xl bg-surface-2 text-muted transition hover:bg-surface-3 hover:text-accent"
+            >
+              <Icon name="book" size={18} />
+            </button>
+            <Notifications onOpenProfile={() => setProfileOpen(true)} />
+            <button
+              type="button"
+              onClick={() => setSettingsOpen(true)}
+              title="تنظیمات و تم"
+              aria-label="تنظیمات و تم"
+              className="press flex h-9 w-9 items-center justify-center rounded-xl bg-surface-2 text-muted transition hover:bg-surface-3 hover:text-fg"
+            >
+              <Icon name="settings" size={18} />
+            </button>
+          </div>
+        </header>
+      )}
+
       <div className="flex min-h-0 flex-1">
         {/* Desktop nav rail (right side in RTL) */}
         <nav className="hidden w-[72px] shrink-0 flex-col items-center gap-2 border-l border-line bg-surface/60 py-4 md:flex">
@@ -278,6 +335,7 @@ export default function Chat() {
               activeId={activeId}
               onOpen={openConversation}
               onOpenSaved={() => void openDirect({ saved: true })}
+              onOpenProfile={(userId) => setViewProfileId(userId)}
               onCreate={(t) => setCreateOpen(t)}
               me={me}
             />
@@ -355,32 +413,209 @@ export default function Chat() {
       </div>
 
       {/* mobile bottom navigation */}
-      <nav className="flex shrink-0 items-stretch justify-around border-t border-line bg-surface/80 pb-[env(safe-area-inset-bottom)] backdrop-blur md:hidden">
-        {([
-          ["chats", "chat", "گفتگو", totalUnread],
-          ["groups", "users", "گروه‌ها", 0],
-          ["meetings", "radio", "میت", 0],
-          ["friends", "user", "دوستان", incoming],
-        ]).map(([id, icon, label, badge]) => (
+      {!activeId && (
+        <nav className="flex shrink-0 items-stretch justify-around border-t border-line bg-surface/90 pb-[env(safe-area-inset-bottom)] backdrop-blur md:hidden">
+          {([
+            ["chats", "chat", "گفتگوها", totalUnread],
+            ["groups", "users", "گروه‌ها", 0],
+            ["meetings", "radio", "میت", 0],
+            ["friends", "user", "دوستان", incoming],
+          ]).map(([id, icon, label, badge]) => (
+            <button
+              key={id}
+              onClick={() => { setTab(id); if (isMobile) setActiveId(null); }}
+              aria-pressed={tab === id && !activeId}
+              aria-label={badge > 0 ? `${label}، ${faNum(badge)} مورد خوانده‌نشده` : label}
+              className={`relative flex flex-1 flex-col items-center gap-1 py-2.5 text-[10px] font-bold transition ${tab === id && !activeId ? "text-accent" : "text-muted"}`}
+            >
+              {tab === id && !activeId && <span className="grad-accent absolute top-0 h-0.5 w-8 rounded-full" />}
+              <span className="relative">
+                <Icon name={icon} size={20} />
+                {badge > 0 && <span className="anim-badge absolute -left-2 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-rose-500 px-1 text-[9px] font-bold text-white">{faNum(badge > 99 ? 99 : badge)}</span>}
+              </span>
+              {label}
+            </button>
+          ))}
           <button
-            key={id}
-            onClick={() => { setTab(id); if (isMobile) setActiveId(null); }}
-            aria-pressed={tab === id && !activeId}
-            aria-label={badge > 0 ? `${label}، ${faNum(badge)} مورد خوانده‌نشده` : label}
-            className={`relative flex flex-1 flex-col items-center gap-1 py-2.5 text-[10px] font-bold transition ${tab === id && !activeId ? "text-accent" : "text-muted"}`}
+            onClick={() => setMobileMenuOpen(true)}
+            aria-label="منو و امکانات بیشتر"
+            className="flex flex-1 flex-col items-center gap-1 py-2 text-[10px] font-bold text-muted hover:text-fg"
           >
-            <span className="relative">
-              <Icon name={icon} size={21} />
-              {badge > 0 && <span className="anim-badge absolute -left-2 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-rose-500 px-1 text-[9px] font-bold text-white">{faNum(badge > 99 ? 99 : badge)}</span>}
-            </span>
-            {label}
+            <Avatar name={me.displayName} color={me.avatarColor} size={21} userId={me.id} avatarFileId={me.avatarFileId} />
+            امکانات
           </button>
-        ))}
-        <button onClick={() => setProfileOpen(true)} aria-label="پروفایل من" className="flex flex-1 flex-col items-center gap-1 py-2 text-[10px] font-bold text-muted">
-          <Avatar name={me.displayName} color={me.avatarColor} size={22} userId={me.id} avatarFileId={me.avatarFileId} />
-          من
-        </button>
-      </nav>
+        </nav>
+      )}
+
+      {/* Mobile Full Feature Sheet / Drawer */}
+      {mobileMenuOpen && (
+        <div
+          dir="rtl"
+          className="fixed inset-0 z-50 flex flex-col justify-end bg-black/65 backdrop-blur-sm md:hidden"
+          onClick={() => setMobileMenuOpen(false)}
+        >
+          <div
+            className="anim-rise max-h-[86dvh] overflow-y-auto rounded-t-3xl border-t border-line bg-surface p-4 pb-[calc(1.25rem+env(safe-area-inset-bottom))] shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mx-auto mb-3 h-1.5 w-12 rounded-full bg-line" />
+            <div className="flex items-center gap-3 rounded-2xl border border-line bg-surface-2/80 p-3">
+              <Avatar
+                name={me.displayName}
+                color={me.avatarColor}
+                size={52}
+                userId={me.id}
+                avatarFileId={me.avatarFileId}
+                status={toPresence(me.status)}
+              />
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-base font-black text-fg">{me.displayName}</p>
+                <p className="truncate text-xs font-semibold text-accent" dir="ltr">@{me.username}</p>
+                {me.bio && <p className="mt-0.5 truncate text-[11px] text-muted">{me.bio}</p>}
+              </div>
+              <button
+                type="button"
+                onClick={() => { setMobileMenuOpen(false); setProfileOpen(true); }}
+                className="grad-accent press rounded-xl px-3 py-2 text-xs font-bold text-on-accent"
+              >
+                پروفایل من
+              </button>
+            </div>
+
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => { setMobileMenuOpen(false); setSettingsOpen(true); }}
+                className="press flex items-center gap-2.5 rounded-xl border border-line bg-surface-2 p-3 text-right hover:bg-surface-3"
+              >
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-accent/15 text-accent">
+                  <Icon name="settings" size={18} />
+                </span>
+                <div className="min-w-0">
+                  <p className="text-xs font-bold text-fg">تنظیمات و تم</p>
+                  <p className="truncate text-[10px] text-muted">ظاهر، اذان، امنیت، بلاک</p>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => { setMobileMenuOpen(false); void openDirect({ saved: true }); }}
+                className="press flex items-center gap-2.5 rounded-xl border border-line bg-surface-2 p-3 text-right hover:bg-surface-3"
+              >
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-400">
+                  <Icon name="bookmark" size={18} />
+                </span>
+                <div className="min-w-0">
+                  <p className="text-xs font-bold text-fg">پیام‌های ذخیره‌شده</p>
+                  <p className="truncate text-[10px] text-muted">فضای ابری شخصی</p>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => { setMobileMenuOpen(false); navigate("/istikhara"); }}
+                className="press flex items-center gap-2.5 rounded-xl border border-line bg-surface-2 p-3 text-right hover:bg-surface-3"
+              >
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-400/15 text-amber-400">
+                  <Icon name="book" size={18} />
+                </span>
+                <div className="min-w-0">
+                  <p className="text-xs font-bold text-fg">استخاره با قرآن</p>
+                  <p className="truncate text-[10px] text-muted">همراه با متن و تفسیر</p>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => { setMobileMenuOpen(false); setTab("friends"); setActiveId(null); }}
+                className="press flex items-center gap-2.5 rounded-xl border border-line bg-surface-2 p-3 text-right hover:bg-surface-3"
+              >
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-sky-500/15 text-sky-400">
+                  <Icon name="users" size={18} />
+                </span>
+                <div className="min-w-0">
+                  <p className="text-xs font-bold text-fg">مخاطبین و دوستان</p>
+                  <p className="truncate text-[10px] text-muted">{incoming > 0 ? `${faNum(incoming)} درخواست جدید` : "افزودن با نام کاربری"}</p>
+                </div>
+              </button>
+
+              {me.permissions.includes("groups.create") && (
+                <button
+                  type="button"
+                  onClick={() => { setMobileMenuOpen(false); setCreateOpen("group"); }}
+                  className="press flex items-center gap-2.5 rounded-xl border border-line bg-surface-2 p-3 text-right hover:bg-surface-3"
+                >
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-purple-500/15 text-purple-400">
+                    <Icon name="plus" size={18} />
+                  </span>
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold text-fg">گروه خصوصی جدید</p>
+                    <p className="truncate text-[10px] text-muted">ساخت گروه با دوستان</p>
+                  </div>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => { setMobileMenuOpen(false); setTab("meetings"); setActiveId(null); }}
+                className="press flex items-center gap-2.5 rounded-xl border border-line bg-surface-2 p-3 text-right hover:bg-surface-3"
+              >
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-500/15 text-indigo-400">
+                  <Icon name="radio" size={18} />
+                </span>
+                <div className="min-w-0">
+                  <p className="text-xs font-bold text-fg">جلسه و میت آنلاین</p>
+                  <p className="truncate text-[10px] text-muted">تماس تصویری و بازی</p>
+                </div>
+              </button>
+
+              {canAdmin && (
+                <button
+                  type="button"
+                  onClick={() => { setMobileMenuOpen(false); navigate("/admin"); }}
+                  className="press col-span-2 flex items-center gap-2.5 rounded-xl border border-accent/30 bg-accent/10 p-3 text-right hover:bg-accent/20"
+                >
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-accent text-on-accent">
+                    <Icon name="shield" size={18} />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs font-black text-fg">پنل مدیریت سامانه</p>
+                    <p className="truncate text-[10px] text-muted">مدیریت کاربران، نقش‌ها، پیام‌ها و آمار</p>
+                  </div>
+                  <Icon name="arrow-left" size={15} className="text-accent" />
+                </button>
+              )}
+            </div>
+
+            <div className="mt-3 flex gap-2 border-t border-line pt-3">
+              <button
+                type="button"
+                onClick={() => setMobileMenuOpen(false)}
+                className="flex-1 rounded-xl border border-line bg-surface-2 py-2.5 text-xs font-bold text-fg hover:bg-surface-3"
+              >
+                بستن
+              </button>
+              <button
+                type="button"
+                onClick={() => void (async () => {
+                  setMobileMenuOpen(false);
+                  const ok = await confirm({
+                    title: "خروج از حساب کاربری",
+                    message: "آیا می‌خواهید از حساب کاربری خود خارج شوید؟",
+                    confirmLabel: "خروج از حساب",
+                    variant: "danger",
+                    icon: "logout",
+                  });
+                  if (ok) await logout();
+                })()}
+                className="press flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-rose-500/15 py-2.5 text-xs font-black text-rose-400 ring-1 ring-rose-500/30 hover:bg-rose-500 hover:text-white"
+              >
+                <Icon name="logout" size={16} /> خروج از حساب
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <CreateModal
         type={createOpen}

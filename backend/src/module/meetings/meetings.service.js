@@ -29,8 +29,36 @@ import { listFriends } from "../contacts/contacts.service.js";
 import * as games from "../games/games.service.js";
 
 /** A participant who sent no heartbeat for this long has left. */
-const TIMEOUT_MS = 20_000;
+const TIMEOUT_MS = 12_000;
 const alive = () => ({ $gt: new Date(Date.now() - TIMEOUT_MS) });
+
+/** In-memory ring buffer of live relayed audio chunks for NAT/firewall fallback (keyed by meetingId). */
+const meetingAudioRelay = new Map();
+let meetingAudioSeq = 0;
+
+function pushMeetingAudioChunk(meetingId, fromJoinToken, mime, data) {
+  let list = meetingAudioRelay.get(meetingId);
+  if (!list) {
+    list = [];
+    meetingAudioRelay.set(meetingId, list);
+  }
+  const now = Date.now();
+  const id = ++meetingAudioSeq;
+  list.push({ id, from: fromJoinToken, mime, data, at: now });
+  while (list.length > 0 && (now - list[0].at > 6_000 || list.length > 150)) {
+    list.shift();
+  }
+  return id;
+}
+
+function readMeetingAudioChunks(meetingId, excludeJoinToken, afterAudioId) {
+  const list = meetingAudioRelay.get(meetingId);
+  if (!list || !list.length) return { audioChunks: [], audioCursor: afterAudioId };
+  const now = Date.now();
+  const fresh = list.filter((c) => now - c.at <= 5_000 && c.id > afterAudioId && c.from !== excludeJoinToken);
+  const latestId = list[list.length - 1]?.id ?? afterAudioId;
+  return { audioChunks: fresh, audioCursor: latestId };
+}
 
 export const newMeetingToken = () => randomBytes(9).toString("base64url");
 export const newJoinToken = () => randomBytes(20).toString("hex");
@@ -252,7 +280,7 @@ export function publicMeeting(m) {
 }
 
 /** Everyone in the meeting (plus lobby waiters for the host) and my own moderation state. */
-async function snapshot(meeting, joinToken, after = 0) {
+async function snapshot(meeting, joinToken, after = 0, afterAudio = 0) {
   const mine = await findOneParticipant({ _id: participantKey(meeting._id, joinToken) });
   if (!mine) {
     throw new HttpError(
@@ -293,10 +321,16 @@ async function snapshot(meeting, joinToken, after = 0) {
       ? await findMeetingSignals({ meetingId: meeting._id, to: joinToken, _id: { $gt: after } })
       : await findMeetingSignals({ meetingId: meeting._id, to: joinToken, createdAt: { $gt: new Date(Date.now() - 30_000) } })
   ).map((s) => ({ id: s._id, from: s.from, kind: s.kind, payload: s.payload }));
+  const inCallTokens = new Set(all.filter((p) => !p.inLobby && !p.micMuted).map((p) => p.joinToken));
+  const { audioChunks, audioCursor } = mine.inLobby
+    ? { audioChunks: [], audioCursor: afterAudio }
+    : readMeetingAudioChunks(meeting._id, joinToken, afterAudio);
   return {
     participants,
     signals,
     cursor: signals.at(-1)?.id ?? after,
+    audioChunks: audioChunks.filter((c) => inCallTokens.has(c.from)),
+    audioCursor,
     game: games.publicGame(await games.activeGame(meeting._id)),
     host: mine.userId !== null && mine.userId === meeting.hostId,
     expiresAt: meeting.expiresAt ?? null,
@@ -314,8 +348,8 @@ function isHostByToken(all, meeting, mine) {
   return mine.userId !== null && mine.userId === meeting.hostId;
 }
 
-export async function getSnapshot(me, meeting, joinToken, after) {
-  return snapshot(meeting, joinToken, after);
+export async function getSnapshot(me, meeting, joinToken, after, afterAudio = 0) {
+  return snapshot(meeting, joinToken, after, afterAudio);
 }
 
 async function requireParticipant(meeting, joinToken) {
@@ -346,6 +380,13 @@ export async function meetingAction(me, meeting, input) {
     return;
   }
   const actor = await requireParticipant(meeting, input.joinToken);
+
+  if (input.action === "audio-chunk") {
+    if (actor.inLobby || actor.micMuted) return;
+    await updateParticipant({ _id: key }, {});
+    pushMeetingAudioChunk(meeting._id, input.joinToken, input.mime || "audio/webm", input.data);
+    return;
+  }
 
   if (input.action === "mic") {
     if (input.on && actor.micMuted) throw new HttpError(403, "میکروفون شما توسط میزبان بسته شده است");

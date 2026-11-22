@@ -67,6 +67,7 @@ export default function VoicePanel({ conversationId, me, detail, onClose, onOpen
   const { confirm } = useConfirm();
   const { menu, open, close } = useContextMenu();
   const voice = useVoiceRoom(conversationId, me);
+  const [minimized, setMinimized] = useState(false);
   const [tab, setTab] = useState(null);
   const [url, setUrl] = useState("");
   const [title, setTitle] = useState("");
@@ -460,6 +461,63 @@ export default function VoicePanel({ conversationId, me, detail, onClose, onOpen
     );
   }
 
+  /* ───────────────────────── Minimized Floating Call Bar ───────────────────────── */
+  if (minimized) {
+    return (
+      <div
+        dir="rtl"
+        className="fixed bottom-4 start-4 z-50 flex w-[min(22rem,calc(100vw-2rem))] items-center gap-2.5 rounded-2xl border border-emerald-400/35 bg-[#12161d]/95 p-2.5 text-white shadow-[0_18px_45px_rgba(0,0,0,.7)] backdrop-blur-xl"
+      >
+        <button
+          type="button"
+          onClick={() => setMinimized(false)}
+          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-400/30 transition hover:bg-emerald-500/30"
+          title="باز کردن پنجرهٔ تماس"
+        >
+          <Icon name="radio" size={18} />
+        </button>
+        <div
+          onClick={() => setMinimized(false)}
+          className="min-w-0 flex-1 cursor-pointer select-none"
+        >
+          <p className="truncate text-xs font-black text-white">{detail.name}</p>
+          <p className="flex items-center gap-1.5 text-[10px] text-emerald-300/90">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+            <span>در تماس صوتی · {faNum(voice.participants.length)} نفر</span>
+            <span dir="ltr" className="text-white/55">· <Elapsed since={joinedAt} /></span>
+          </p>
+        </div>
+        <button
+          type="button"
+          disabled={!canSpeak}
+          onClick={() => void voice.toggleMic()}
+          title={voice.micOn ? "خاموش کردن میکروفون" : "روشن کردن میکروفون"}
+          className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl transition disabled:opacity-40 ${
+            voice.micOn ? "bg-emerald-500 text-[#082417]" : "bg-[#ea4335] text-white"
+          }`}
+        >
+          <Icon name={voice.micOn ? "mic" : "mic-off"} size={16} />
+        </button>
+        <button
+          type="button"
+          onClick={() => setMinimized(false)}
+          title="بزرگ‌نمایی تماس"
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-white/10 text-white hover:bg-white/20"
+        >
+          <Icon name="maximize" size={15} />
+        </button>
+        <button
+          type="button"
+          onClick={() => void voice.leave().then(onClose)}
+          title="قطع تماس"
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-rose-500/90 text-white hover:bg-rose-500"
+        >
+          <Icon name="phone-off" size={15} />
+        </button>
+      </div>
+    );
+  }
+
   /* ───────────────────────── In-call ───────────────────────── */
   return (
     <div ref={rootFsRef} className="anim-surface-in fixed inset-0 z-40 flex flex-col overflow-hidden bg-[#101010] text-[#e8eaed]">
@@ -478,6 +536,18 @@ export default function VoicePanel({ conversationId, me, detail, onClose, onOpen
           </span>
           <span className="rounded-full bg-white/5 px-2.5 py-1 text-[11px] text-white/60">{faNum(voice.participants.length)} نفر</span>
           <button
+            onClick={() => {
+              if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
+              setMinimized(true);
+            }}
+            aria-label="کوچک‌کردن و بازگشت به چت"
+            title="کوچک‌کردن تماس و بازگشت به فضای چت"
+            className="flex h-9 items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-2.5 text-[11px] font-bold text-white/80 transition hover:bg-white/15 hover:text-white"
+          >
+            <Icon name="pip" size={15} />
+            <span className="hidden sm:inline">کوچک‌کردن</span>
+          </button>
+          <button
             onClick={() => void toggleElementFullscreen(rootFsRef.current)}
             aria-label={roomFs ? "خروج از تمام‌صفحه" : "تمام‌صفحه"}
             title={roomFs ? "خروج از تمام‌صفحه" : "تمام‌صفحه"}
@@ -485,7 +555,17 @@ export default function VoicePanel({ conversationId, me, detail, onClose, onOpen
           >
             <Icon name={roomFs ? "minimize" : "maximize"} size={16} />
           </button>
-          <button onClick={onClose} aria-label="بستن" title="بستن پنجرهٔ جلسه" className="flex h-9 w-9 items-center justify-center rounded-full text-white/60 transition hover:bg-white/10 hover:text-white"><Icon name="close" size={17} /></button>
+          <button
+            onClick={() => {
+              if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
+              setMinimized(true);
+            }}
+            aria-label="بازگشت به چت (تماس فعال می‌ماند)"
+            title="بازگشت به گفتگوها (تماس در پایین صفحه فعال می‌ماند)"
+            className="flex h-9 w-9 items-center justify-center rounded-full text-white/60 transition hover:bg-white/10 hover:text-white"
+          >
+            <Icon name="chevron-down" size={17} />
+          </button>
         </div>
       </div>
 

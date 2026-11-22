@@ -13,6 +13,11 @@ export const validateVoiceAction = (req) => {
     input = { action, joinToken, forceTakeover: req.body.forceTakeover === true };
   } else if (action === "leave" || action === "heartbeat") {
     input = { action, joinToken };
+  } else if (action === "audio-chunk") {
+    const data = text(req.body.data, 120_000);
+    const mime = text(req.body.mime, 80);
+    if (!data) throw invalid();
+    input = { action, joinToken, data, mime };
   } else if (action === "mic") {
     input = { action, joinToken, on: req.body.on === true };
   } else if (action === "share") {

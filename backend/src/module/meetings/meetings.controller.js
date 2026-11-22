@@ -29,7 +29,15 @@ export const snapshot = async (req, res) => {
   const meeting = await meetingsService.resolveMeeting(req.params.token, req.user);
   const joinToken = text(req.query.get("joinToken"), 100);
   if (!joinToken) throw new HttpError(400, "joinToken لازم است");
-  res.json(await meetingsService.getSnapshot(req.user, meeting, joinToken, positiveInt(req.query.get("after"))));
+  res.json(
+    await meetingsService.getSnapshot(
+      req.user,
+      meeting,
+      joinToken,
+      positiveInt(req.query.get("after")),
+      positiveInt(req.query.get("afterAudio")),
+    ),
+  );
 };
 
 export const action = async (req, res) => {

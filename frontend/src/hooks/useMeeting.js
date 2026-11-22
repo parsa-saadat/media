@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch, getBrowserId, toast } from "../utils/client";
 import { playSound } from "../utils/sounds";
 import { createSpeakingDetector, emitMicLevel } from "../utils/micMeter";
+import { createRelayAudioPlayer, createRelayAudioSender } from "../utils/liveAudioRelay";
 
 const DEFAULT_PREFS = { inputId: "", outputId: "", master: 100, micGain: 100, volumes: {} };
 
@@ -55,10 +56,14 @@ export function useMeeting(token, me) {
   const prefsRef = useRef(prefs);
   const prefsReady = useRef(false);
   const myToken = useRef("");
+  const micOnRef = useRef(false);
   const myStateRef = useRef(myState);
   const participantsRef = useRef([]);
   const peers = useRef(new Map());
   const cursor = useRef(0);
+  const audioCursor = useRef(0);
+  const relayPlayerRef = useRef(null);
+  const relaySenderRef = useRef(null);
   const micStream = useRef(null);
   const micTrack = useRef(null);
   const screenStream = useRef(null);
@@ -142,14 +147,18 @@ export function useMeeting(token, me) {
   }, []);
 
   const volumeOf = useCallback((p) => {
-    if (!p.micOn || p.micMuted) return 0;
+    if (!p) return 1;
+    if (p.micMuted) return 0;
+    // Never zero volume just because p.micOn hasn't polled true yet! Remote track/silence controls speech.
     return Math.min(1, Math.max(0, (prefsRef.current.master / 100) * ((prefsRef.current.volumes[p.joinToken] ?? 100) / 100)));
   }, []);
 
   useEffect(() => {
     for (const p of participants) {
       const el = elements.current.get(p.joinToken);
-      if (el) el.volume = volumeOf(p);
+      const v = volumeOf(p);
+      if (el) el.volume = v;
+      relayPlayerRef.current?.setPeerVolume(p.joinToken, v);
     }
   }, [participants, prefs, volumeOf]);
 
@@ -281,6 +290,7 @@ export function useMeeting(token, me) {
         iceServers: [
           { urls: "stun:stun.l.google.com:19302" },
           { urls: "stun:stun1.l.google.com:19302" },
+          { urls: "stun:stun.cloudflare.com:3478" },
         ],
       });
       // Deterministic politeness for glare resolution: lexicographically larger token is polite.
@@ -322,8 +332,9 @@ export function useMeeting(token, me) {
       peers.current.set(other.joinToken, peer);
 
       pc.onnegotiationneeded = () => {
-        // Only auto-open the initial offer from the initiator; later track updates call negotiatePeer explicitly on BOTH polite & impolite sides!
-        if (!peer.audioTransceiver && !isInitiator) return;
+        // Only auto-open the initial offer from the initiator; later track updates call negotiatePeer explicitly on BOTH sides!
+        if (!isInitiator || peer.initialNegotiated) return;
+        peer.initialNegotiated = true;
         void negotiatePeer(peer, other.joinToken);
       };
 
@@ -335,8 +346,13 @@ export function useMeeting(token, me) {
         if (!alive.current) return;
         const track = e.track;
         if (track.kind === "audio") {
-          const stream = e.streams[0] ?? new MediaStream([track]);
-          attach(other.joinToken, "audio", stream);
+          const publishAudio = () => {
+            if (!alive.current) return;
+            const stream = e.streams[0] ?? new MediaStream([track]);
+            attach(other.joinToken, "audio", stream);
+          };
+          publishAudio();
+          track.onunmute = publishAudio;
           return;
         }
         // Determine whether this video transceiver is slot 1 (camera) or slot 2 (screen)
@@ -479,6 +495,7 @@ export function useMeeting(token, me) {
       let outTrack = stream.getAudioTracks()[0];
       try {
         const ctx = new AudioContext();
+        if (ctx.state === "suspended") void ctx.resume().catch(() => {});
         const source = ctx.createMediaStreamSource(stream);
         const gain = ctx.createGain();
         gain.gain.value = prefsRef.current.micGain / 100;
@@ -510,7 +527,11 @@ export function useMeeting(token, me) {
         audioCtx.current = null;
         gainNode.current = null;
       }
-      outTrack.enabled = false;
+      const shouldEnable = micOnRef.current && !myStateRef.current.micMuted;
+      outTrack.enabled = shouldEnable;
+      stream.getAudioTracks().forEach((t) => {
+        t.enabled = shouldEnable;
+      });
       micStream.current = stream;
       micTrack.current = outTrack;
       for (const [peerToken, peer] of peers.current.entries()) {
@@ -619,20 +640,38 @@ export function useMeeting(token, me) {
     async (name, opts = {}) => {
       if (myToken.current) return { ok: true };
       setPhase("connecting");
+      let savedSession = null;
+      try {
+        savedSession = JSON.parse(sessionStorage.getItem(`inebuly-meet-session:${token}`) || "null");
+      } catch {
+        savedSession = null;
+      }
+      const resumeJoinToken = opts.resumeJoinToken ?? savedSession?.joinToken ?? "";
+      const effectiveName = (name ?? savedSession?.name ?? "").trim();
       try {
         const data = await apiFetch(`/api/meetings/${token}/join`, {
           method: "POST",
           json: {
-            name: name ?? "",
-            joinToken: "",
+            name: effectiveName,
+            joinToken: resumeJoinToken,
             browserId: getBrowserId(),
-            forceTakeover: opts.forceTakeover === true,
+            // If resuming our own tab session or user requested takeover, allow seamless re-entry!
+            forceTakeover: opts.forceTakeover === true || Boolean(resumeJoinToken),
           },
         });
         if (!alive.current) return { ok: false };
         myToken.current = data.joinToken;
         setJoinToken(data.joinToken);
+        try {
+          sessionStorage.setItem(
+            `inebuly-meet-session:${token}`,
+            JSON.stringify({ joinToken: data.joinToken, name: effectiveName || me?.displayName || "" }),
+          );
+        } catch {
+          /* ignore */
+        }
         cursor.current = data.cursor;
+        if (typeof data.audioCursor === "number") audioCursor.current = data.audioCursor;
         participantsRef.current = data.participants;
         setParticipants(data.participants);
         setMyState(data.myState);
@@ -649,26 +688,52 @@ export function useMeeting(token, me) {
             /* ignore */
           }
         }
-        playSound(data.myState.inLobby ? "knock" : "join");
+        if (!opts.silentSound) playSound(data.myState.inLobby ? "knock" : "join");
         setPhase(data.myState.inLobby ? "lobby" : "joined");
         return { ok: true };
       } catch (e) {
         setPhase("idle");
         const code = e.body?.code || null;
+        if (resumeJoinToken && (e.status === 404 || e.status === 410)) {
+          try { sessionStorage.removeItem(`inebuly-meet-session:${token}`); } catch {}
+        }
         if (!opts.silentConflict || !code) {
-          toast(e.message, "error");
+          if (!opts.silentError) toast(e.message, "error");
         }
         return { ok: false, code, message: e.message, existingName: e.body?.existingName };
       }
     },
-    [token],
+    [me?.displayName, token],
   );
+
+  // Auto-rejoin immediately on page refresh if this browser tab already had an active meeting session!
+  const autoRejoinedRef = useRef(false);
+  useEffect(() => {
+    if (autoRejoinedRef.current || myToken.current) return;
+    let savedSession = null;
+    try {
+      savedSession = JSON.parse(sessionStorage.getItem(`inebuly-meet-session:${token}`) || "null");
+    } catch {
+      savedSession = null;
+    }
+    if (!savedSession?.joinToken) return;
+    autoRejoinedRef.current = true;
+    void join(savedSession.name || me?.displayName || "", {
+      resumeJoinToken: savedSession.joinToken,
+      forceTakeover: true,
+      silentConflict: true,
+      silentError: true,
+      silentSound: true,
+    });
+  }, [join, me?.displayName, token]);
 
   const leave = useCallback(async () => {
     const old = myToken.current;
+    try { sessionStorage.removeItem(`inebuly-meet-session:${token}`); } catch {}
     myToken.current = "";
     setJoinToken("");
     setPhase("idle");
+    micOnRef.current = false;
     setMicOn(false);
     setSpeaking(false);
     setSharing(false);
@@ -690,12 +755,33 @@ export function useMeeting(token, me) {
       setLocalCamera(null);
     }
     for (const key of [...peers.current.keys()]) closePeer(key);
-    if (old) await call({ action: "leave" }).catch(() => {});
+    if (old) await apiFetch(`/api/meetings/${token}/action`, { method: "POST", json: { action: "leave", joinToken: old } }).catch(() => {});
     playSound("leave");
-  }, [call, closePeer, stopMic]);
+  }, [closePeer, stopMic, token]);
 
   useEffect(() => {
     if (!joinToken || (phase !== "joined" && phase !== "lobby")) return;
+    if (!relayPlayerRef.current) relayPlayerRef.current = createRelayAudioPlayer();
+    const sender = createRelayAudioSender({
+      getTrack: () => (micOnRef.current ? micTrack.current : null),
+      shouldSend: () => {
+        if (!myToken.current || phase !== "joined" || !micOnRef.current || myStateRef.current.micMuted) return false;
+        const others = participantsRef.current.filter((p) => !p.inLobby && p.joinToken !== myToken.current);
+        if (!others.length) return false;
+        return others.some((p) => {
+          const peer = peers.current.get(p.joinToken);
+          return !(peer?.pc?.connectionState === "connected" || peer?.pc?.iceConnectionState === "connected");
+        });
+      },
+      onChunk: (data, mime) => {
+        if (!myToken.current) return;
+        void call({ action: "audio-chunk", data, mime }).catch(() => {});
+      },
+      sliceMs: 420,
+    });
+    relaySenderRef.current = sender;
+    sender.start();
+
     let bc = null;
     if (typeof BroadcastChannel !== "undefined") {
       try {
@@ -710,17 +796,31 @@ export function useMeeting(token, me) {
         bc = null;
       }
     }
+    const unlock = () => {
+      if (audioCtx.current?.state === "suspended") void audioCtx.current.resume().catch(() => {});
+      relayPlayerRef.current?.resume();
+      for (const el of elements.current.values()) {
+        if (el.paused) void el.play().catch(() => {});
+      }
+    };
+    document.addEventListener("pointerdown", unlock, { passive: true });
+    document.addEventListener("keydown", unlock, { passive: true });
+
     void poll();
-    const ticker = window.setInterval(() => void poll(), 1100);
+    const ticker = window.setInterval(() => void poll(), 450);
     const beat = window.setInterval(() => {
       void call({ action: "heartbeat" }).catch((err) => {
         if (err?.body?.code === "EVICTED_OR_LEFT" || err?.status === 409 || err?.status === 410) {
           void poll();
         }
       });
-    }, 5000);
+    }, 4500);
     return () => {
+      sender.stop();
+      relaySenderRef.current = null;
       bc?.close();
+      document.removeEventListener("pointerdown", unlock);
+      document.removeEventListener("keydown", unlock);
       window.clearInterval(ticker);
       window.clearInterval(beat);
     };
@@ -738,6 +838,10 @@ export function useMeeting(token, me) {
       alive.current = false;
       const old = myToken.current;
       myToken.current = "";
+      relaySenderRef.current?.stop();
+      relaySenderRef.current = null;
+      relayPlayerRef.current?.destroy();
+      relayPlayerRef.current = null;
       micStream.current?.getTracks().forEach((t) => t.stop());
       micTrack.current?.stop();
       screenStream.current?.getTracks().forEach((t) => t.stop());
@@ -752,7 +856,11 @@ export function useMeeting(token, me) {
         el.remove();
       }
       elements.current.clear();
-      if (old) {
+      // Only send leave on React component unmount (SPA navigation without minimizing).
+      // On browser refresh, sessionStorage retains `inebuly-meet-session:${token}` so the reloaded page rebinds seamlessly!
+      let hasSaved = false;
+      try { hasSaved = Boolean(sessionStorage.getItem(`inebuly-meet-session:${token}`)); } catch {}
+      if (old && !hasSaved) {
         void fetch(`/api/meetings/${token}/action`, {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -777,9 +885,11 @@ export function useMeeting(token, me) {
         return;
       }
     }
-    const next = !micOn;
+    if (audioCtx.current?.state === "suspended") void audioCtx.current.resume().catch(() => {});
+    const next = !micOnRef.current;
     try {
       await call({ action: "mic", on: next });
+      micOnRef.current = next;
       if (micTrack.current) micTrack.current.enabled = next;
       micStream.current?.getAudioTracks().forEach((t) => {
         t.enabled = next;
@@ -791,7 +901,7 @@ export function useMeeting(token, me) {
     } catch (e) {
       toast(e.message, "error");
     }
-  }, [call, micOn, openMic, syncLocalMediaToPeer]);
+  }, [call, openMic, syncLocalMediaToPeer]);
 
   const broadcastMediaUpdate = useCallback(async () => {
     for (const [peerToken, peer] of peers.current.entries()) {
@@ -1002,7 +1112,9 @@ export function useMeeting(token, me) {
     startCamera, stopCamera, changeCameraQuality,
     gameCreate: (type) => gameAction("game-create", { game: type }),
     gameJoin: () => gameAction("game-join"),
+    gameSpectate: () => gameAction("game-spectate"),
     gameStart: () => gameAction("game-start"),
+    gameRematch: () => gameAction("game-rematch"),
     gameMove: (move) => gameAction("game-move", { move }),
     gameClose: async () => {
       const d = await gameAction("game-close");

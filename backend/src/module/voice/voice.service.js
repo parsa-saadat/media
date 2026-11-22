@@ -28,8 +28,38 @@ import { assertNotBlocked, blockedIdsOf } from "../contacts/contacts.service.js"
 import { removeUnusedFiles, stopTracks } from "../storage/storage.service.js";
 
 /** A participant who sent no heartbeat for this long is no longer in the call. */
-const VOICE_TIMEOUT_MS = 18_000;
+const VOICE_TIMEOUT_MS = 12_000;
 const alive = () => ({ $gt: new Date(Date.now() - VOICE_TIMEOUT_MS) });
+
+/** In-memory ring buffer of live relayed audio chunks for NAT/firewall fallback (keyed by chatId). */
+const voiceAudioRelay = new Map();
+let voiceAudioSeq = 0;
+
+function pushVoiceAudioChunk(chatId, fromUserId, joinToken, mime, data) {
+  let list = voiceAudioRelay.get(chatId);
+  if (!list) {
+    list = [];
+    voiceAudioRelay.set(chatId, list);
+  }
+  const now = Date.now();
+  const id = ++voiceAudioSeq;
+  list.push({ id, fromUserId, joinToken, mime, data, at: now });
+  while (list.length > 0 && (now - list[0].at > 6_000 || list.length > 150)) {
+    list.shift();
+  }
+  return id;
+}
+
+function readVoiceAudioChunks(chatId, excludeUserId, visibleSet, afterAudioId) {
+  const list = voiceAudioRelay.get(chatId);
+  if (!list || !list.length) return { audioChunks: [], audioCursor: afterAudioId };
+  const now = Date.now();
+  const fresh = list.filter(
+    (c) => now - c.at <= 5_000 && c.id > afterAudioId && c.fromUserId !== excludeUserId && visibleSet.has(c.fromUserId),
+  );
+  const latestId = list[list.length - 1]?.id ?? afterAudioId;
+  return { audioChunks: fresh, audioCursor: latestId };
+}
 
 async function requireVoiceRoom(me, chatId) {
   const room = await requireMember(chatId, me);
@@ -55,7 +85,7 @@ async function requirePresence(chatId, userId, joinToken) {
 }
 
 /** Everything a client needs on each poll: who is in the call, the bots, and WebRTC signals addressed to me. */
-async function snapshot(me, chatId, after) {
+async function snapshot(me, chatId, after, afterAudio = 0) {
   const [blocked, presences, restrictions, trackDocs, signalDocs, myRestrictions] = await Promise.all([
     blockedIdsOf(me.id),
     findPresences({ conversationId: chatId, lastSeenAt: alive() }),
@@ -120,12 +150,23 @@ async function snapshot(me, chatId, after) {
     .filter((signal) => present.has(signal.fromUserId))
     .map((signal) => ({ id: signal._id, fromUserId: signal.fromUserId, kind: signal.kind, payload: signal.payload }));
 
-  return { participants, tracks, signals, cursor: signals.at(-1)?.id ?? after, myRestrictions, serverTime: Date.now() };
+  const { audioChunks, audioCursor } = readVoiceAudioChunks(chatId, me.id, present, afterAudio);
+
+  return {
+    participants,
+    tracks,
+    signals,
+    audioChunks,
+    audioCursor,
+    cursor: signals.at(-1)?.id ?? after,
+    myRestrictions,
+    serverTime: Date.now(),
+  };
 }
 
-export async function getSnapshot(me, chatId, after) {
+export async function getSnapshot(me, chatId, after, afterAudio = 0) {
   await requireVoiceRoom(me, chatId);
-  return snapshot(me, chatId, after);
+  return snapshot(me, chatId, after, afterAudio);
 }
 
 export async function joinVoice(me, chatId, input = {}) {
@@ -143,7 +184,8 @@ export async function joinVoice(me, chatId, input = {}) {
       lastSeenAt: new Date(),
     });
     const baseline = (await findLastSignal({ conversationId: chatId, toUserId: me.id }))?._id ?? 0;
-    return { joinToken: existing.joinToken, ...(await snapshot(me, chatId, baseline)), cursor: baseline };
+    const latestAudio = voiceAudioRelay.get(chatId)?.at(-1)?.id ?? 0;
+    return { joinToken: existing.joinToken, ...(await snapshot(me, chatId, baseline, latestAudio)), cursor: baseline };
   }
 
   // Active in another tab or device: ask for explicit takeover unless forceTakeover is true
@@ -165,7 +207,8 @@ export async function joinVoice(me, chatId, input = {}) {
   const joinToken = generateJoinToken();
   await upsertPresence(chatId, me.id, { joinToken, micOn: false, sharingOn: false, shareQuality: "720p", lastSeenAt: new Date() });
   await stopTracks({ _id: voiceKey(chatId, me.id) });
-  return { joinToken, ...(await snapshot(me, chatId, baseline)), cursor: baseline };
+  const latestAudio = voiceAudioRelay.get(chatId)?.at(-1)?.id ?? 0;
+  return { joinToken, ...(await snapshot(me, chatId, baseline, latestAudio)), cursor: baseline };
 }
 
 export async function leaveVoice(me, chatId, joinToken) {
@@ -177,6 +220,14 @@ export async function heartbeat(me, chatId, joinToken) {
   await requireVoiceRoom(me, chatId);
   await requirePresence(chatId, me.id, joinToken);
   await updatePresences({ _id: voiceKey(chatId, me.id) }, { lastSeenAt: new Date() });
+}
+
+export async function relayAudio(me, chatId, input) {
+  await requireVoiceRoom(me, chatId);
+  await requirePresence(chatId, me.id, input.joinToken);
+  if (!me.permissions.includes("voice.speak") || (await ownRestrictions(chatId, me.id)).micMuted) return;
+  await updatePresences({ _id: voiceKey(chatId, me.id) }, { lastSeenAt: new Date() });
+  pushVoiceAudioChunk(chatId, me.id, input.joinToken, input.mime || "audio/webm", input.data);
 }
 
 export async function setMic(me, chatId, joinToken, on) {
