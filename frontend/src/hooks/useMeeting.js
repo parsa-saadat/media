@@ -3,6 +3,7 @@ import { apiFetch, getBrowserId, toast } from "../utils/client";
 import { playSound } from "../utils/sounds";
 import { createSpeakingDetector, emitMicLevel } from "../utils/micMeter";
 import { createRelayAudioPlayer, createRelayAudioSender } from "../utils/liveAudioRelay";
+import { RTC_CONFIG, watchIce } from "../config/rtc";
 
 const DEFAULT_PREFS = { inputId: "", outputId: "", master: 100, micGain: 100, volumes: {} };
 
@@ -286,13 +287,8 @@ export function useMeeting(token, me) {
     (other, isInitiator = false) => {
       const existing = peers.current.get(other.joinToken);
       if (existing) return existing;
-      const pc = new RTCPeerConnection({
-        iceServers: [
-          { urls: "stun:stun.l.google.com:19302" },
-          { urls: "stun:stun1.l.google.com:19302" },
-          { urls: "stun:stun.cloudflare.com:3478" },
-        ],
-      });
+      const pc = new RTCPeerConnection(RTC_CONFIG);
+      watchIce(pc, `meet:${other.joinToken.slice(0, 6)}`);
       // Deterministic politeness for glare resolution: lexicographically larger token is polite.
       const polite = myToken.current > other.joinToken;
       const peer = {
@@ -423,10 +419,10 @@ export function useMeeting(token, me) {
           if (peer.ignoringOffer) return;
 
           if (offerCollision && peer.polite) {
-            await Promise.all([
-              peer.pc.setLocalDescription({ type: "rollback" }).catch(() => {}),
-              peer.pc.setRemoteDescription(description),
-            ]);
+            // Must be sequential: running rollback and setRemoteDescription in parallel races and throws,
+            // which used to tear the whole peer connection down (and left the two sides out of sync).
+            await peer.pc.setLocalDescription({ type: "rollback" }).catch(() => {});
+            await peer.pc.setRemoteDescription(description);
           } else {
             await peer.pc.setRemoteDescription(description);
           }

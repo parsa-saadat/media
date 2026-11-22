@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch, getToken, toast } from "../utils/client";
 import { createSpeakingDetector, emitMicLevel } from "../utils/micMeter";
 import { createRelayAudioPlayer, createRelayAudioSender } from "../utils/liveAudioRelay";
+import { RTC_CONFIG, watchIce } from "../config/rtc";
 
 const DEFAULT_PREFS = { inputId: "", outputId: "", master: 100, micGain: 100, volumes: {} };
 
@@ -270,11 +271,8 @@ export function useVoiceRoom(conversationId, me) {
   const createPeer = useCallback((user, initiator) => {
     const existing = peersRef.current.get(user.userId);
     if (existing) return existing;
-    const pc = new RTCPeerConnection({ iceServers: [
-      { urls: "stun:stun.l.google.com:19302" },
-      { urls: "stun:stun1.l.google.com:19302" },
-      { urls: "stun:stun.cloudflare.com:3478" },
-    ] });
+    const pc = new RTCPeerConnection(RTC_CONFIG);
+    watchIce(pc, `voice:${user.userId}`);
     // Numerical comparison so user IDs like 2 vs 10 never suffer string lexicographical bugs!
     const polite = Number(me.id) > Number(user.userId);
     const peer = {
@@ -376,10 +374,8 @@ export function useVoiceRoom(conversationId, me) {
         if (peer.ignoringOffer) return;
 
         if (offerCollision && peer.polite) {
-          await Promise.all([
-            peer.pc.setLocalDescription({ type: "rollback" }).catch(() => {}),
-            peer.pc.setRemoteDescription(payload),
-          ]);
+          await peer.pc.setLocalDescription({ type: "rollback" }).catch(() => {});
+          await peer.pc.setRemoteDescription(payload);
         } else {
           await peer.pc.setRemoteDescription(payload);
         }
