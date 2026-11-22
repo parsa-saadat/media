@@ -63,7 +63,7 @@ function roundBtn(label, opts) {
   );
 }
 
-export default function VoicePanel({ conversationId, me, detail, onClose, onOpenDirect }) {
+export default function VoicePanel({ conversationId, me, detail, onClose, onOpenDirect, onOpenProfile }) {
   const { confirm } = useConfirm();
   const { menu, open, close } = useContextMenu();
   const voice = useVoiceRoom(conversationId, me);
@@ -78,7 +78,11 @@ export default function VoicePanel({ conversationId, me, detail, onClose, onOpen
   const [pinned, setPinned] = useState(null);
   const [hiddenShares, setHiddenShares] = useState(new Set());
   const [shareMenu, setShareMenu] = useState(false);
+  const [roomFs, setRoomFs] = useState(false);
+  const [streamFs, setStreamFs] = useState(false);
   const shareRef = useRef(null);
+  const rootFsRef = useRef(null);
+  const streamFsRef = useRef(null);
   // lobby choices
   const [micReady, setMicReady] = useState("idle");
   const [joinWithMic, setJoinWithMic] = useState(true);
@@ -128,6 +132,36 @@ export default function VoicePanel({ conversationId, me, detail, onClose, onOpen
     if (voice.status === "joined" && !joinedAt) setJoinedAt(Date.now());
     if (voice.status === "idle" && joinedAt) setJoinedAt(0);
   }, [voice.status, joinedAt]);
+
+  useEffect(() => {
+    const onFsChange = () => {
+      const fsEl = document.fullscreenElement || document.webkitFullscreenElement || null;
+      setRoomFs(Boolean(fsEl && fsEl === rootFsRef.current));
+      setStreamFs(Boolean(fsEl && fsEl === streamFsRef.current));
+    };
+    document.addEventListener("fullscreenchange", onFsChange);
+    document.addEventListener("webkitfullscreenchange", onFsChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", onFsChange);
+      document.removeEventListener("webkitfullscreenchange", onFsChange);
+    };
+  }, []);
+
+  async function toggleElementFullscreen(el) {
+    if (!el) return;
+    try {
+      const current = document.fullscreenElement || document.webkitFullscreenElement;
+      if (current === el) {
+        if (document.exitFullscreen) await document.exitFullscreen();
+        else if (document.webkitExitFullscreen) await document.webkitExitFullscreen();
+      } else {
+        if (el.requestFullscreen) await el.requestFullscreen();
+        else if (el.webkitRequestFullscreen) await el.webkitRequestFullscreen();
+      }
+    } catch {
+      toast("نمایش تمام‌صفحه در این مرورگر مجاز نیست", "error");
+    }
+  }
 
   const pinnedId = pinned && voice.participants.some((p) => p.userId === pinned) ? pinned : null;
   const tiles = useMemo(() => (pinnedId ? voice.participants.filter((p) => p.userId === pinnedId) : voice.participants), [pinnedId, voice.participants]);
@@ -210,6 +244,7 @@ export default function VoicePanel({ conversationId, me, detail, onClose, onOpen
     const vol = voice.prefs.volumes[String(person.userId)] ?? 100;
     const items = [
       { type: "label", label: mine ? `${person.displayName} (شما)` : person.displayName },
+      { type: "item", key: "profile", label: mine ? "مشاهده پروفایل من" : "مشاهده پروفایل", icon: "user", onClick: () => onOpenProfile?.(person.userId) },
       { type: "item", key: "pin", label: pinnedId === person.userId ? "برداشتن پین" : "پین کردن روی صفحه", icon: "pin", onClick: () => setPinned((p) => (p === person.userId ? null : person.userId)) },
     ];
     if (mine) {
@@ -381,6 +416,25 @@ export default function VoicePanel({ conversationId, me, detail, onClose, onOpen
               <p role="alert" className="max-w-md rounded-lg border border-amber-400/30 bg-amber-400/10 px-4 py-2 text-right text-xs leading-6 text-amber-300">{voice.micError}</p>
             )}
 
+            {(voice.conflictOtherDevice || lobbyPeople.some((p) => p.userId === me.id)) && (
+              <div className="w-full max-w-md rounded-xl border border-amber-400/35 bg-amber-500/10 p-3.5 text-right">
+                <p className="flex items-center gap-2 text-xs font-black text-amber-300">
+                  <Icon name="devices" size={16} /> شما با تب یا دستگاه دیگری در این تماس هستید
+                </p>
+                <p className="mt-1 text-[11px] leading-5 text-white/75">
+                  با زدن دکمهٔ زیر، اتصال قبلی در تب یا دستگاه دیگر فوراً قطع می‌شود و با همین پنجره وارد تماس می‌شوید.
+                </p>
+                <button
+                  type="button"
+                  disabled={connecting}
+                  onClick={() => void voice.join({ micEnabled: joinWithMic && canSpeak && micReady === "ready", forceTakeover: true })}
+                  className="mt-2.5 flex w-full items-center justify-center gap-2 rounded-lg bg-amber-400 px-4 py-2.5 text-xs font-black text-[#2d1d00] shadow transition hover:bg-amber-300 disabled:opacity-50"
+                >
+                  <Icon name="devices" size={15} /> قطع دستگاه دیگر و ورود با این دستگاه
+                </button>
+              </div>
+            )}
+
             <div className="flex w-full max-w-sm flex-col gap-3 sm:flex-row lg:max-w-none">
               <button
                 onClick={() => void voice.join({ micEnabled: joinWithMic && canSpeak && micReady === "ready" })}
@@ -408,7 +462,7 @@ export default function VoicePanel({ conversationId, me, detail, onClose, onOpen
 
   /* ───────────────────────── In-call ───────────────────────── */
   return (
-    <div className="anim-surface-in fixed inset-0 z-40 flex flex-col overflow-hidden bg-[#101010] text-[#e8eaed]">
+    <div ref={rootFsRef} className="anim-surface-in fixed inset-0 z-40 flex flex-col overflow-hidden bg-[#101010] text-[#e8eaed]">
       {/* top bar */}
       <div className="flex shrink-0 items-center gap-3 border-b border-white/5 px-3 py-2.5 sm:px-5">
         <div className="flex min-w-0 items-center gap-3">
@@ -418,11 +472,19 @@ export default function VoicePanel({ conversationId, me, detail, onClose, onOpen
             <p className="truncate text-[10px] text-white/45" dir="ltr">گفتگوی صوتی · <Elapsed since={joinedAt} /></p>
           </div>
         </div>
-        <div className="ms-auto flex items-center gap-2">
+        <div className="ms-auto flex items-center gap-1.5 sm:gap-2">
           <span className="hidden items-center gap-1.5 rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2.5 py-1 text-[10px] text-emerald-300 md:flex">
             <Icon name="lock" size={12} /> رمزنگاری‌شده
           </span>
           <span className="rounded-full bg-white/5 px-2.5 py-1 text-[11px] text-white/60">{faNum(voice.participants.length)} نفر</span>
+          <button
+            onClick={() => void toggleElementFullscreen(rootFsRef.current)}
+            aria-label={roomFs ? "خروج از تمام‌صفحه" : "تمام‌صفحه"}
+            title={roomFs ? "خروج از تمام‌صفحه" : "تمام‌صفحه"}
+            className="flex h-9 w-9 items-center justify-center rounded-full text-white/65 transition hover:bg-white/10 hover:text-white"
+          >
+            <Icon name={roomFs ? "minimize" : "maximize"} size={16} />
+          </button>
           <button onClick={onClose} aria-label="بستن" title="بستن پنجرهٔ جلسه" className="flex h-9 w-9 items-center justify-center rounded-full text-white/60 transition hover:bg-white/10 hover:text-white"><Icon name="close" size={17} /></button>
         </div>
       </div>
@@ -431,7 +493,7 @@ export default function VoicePanel({ conversationId, me, detail, onClose, onOpen
       <div className="flex min-h-0 flex-1">
         <main className="relative flex min-w-0 flex-1 flex-col p-2 sm:p-4">
           {(voice.sharing || sharer) && (
-            <div className="relative mb-2 min-h-0 flex-1 overflow-hidden rounded-lg border border-white/10 bg-black">
+            <div ref={streamFsRef} className="relative mb-2 min-h-0 flex-1 overflow-hidden rounded-lg border border-white/10 bg-black">
               <RemoteScreen
                 stream={voice.sharing ? voice.localScreen : (sharer ? voice.remoteVideos[sharer.userId] ?? null : null)}
                 name={voice.sharing ? "شما" : sharer?.displayName ?? ""}
@@ -441,7 +503,16 @@ export default function VoicePanel({ conversationId, me, detail, onClose, onOpen
                   <Icon name="screen" size={13} />{" "}
                   {voice.sharing ? "صفحهٔ شما" : `صفحهٔ ${sharer?.displayName}`} · {voice.sharing ? voice.shareQuality : sharer?.shareQuality ?? "720p"}
                 </span>
-                <span className="pointer-events-auto flex gap-1">
+                <span className="pointer-events-auto flex items-center gap-1.5">
+                  <button
+                    onClick={() => void toggleElementFullscreen(streamFsRef.current)}
+                    title={streamFs ? "خروج از تمام‌صفحهٔ استریم" : "تمام‌صفحهٔ استریم"}
+                    aria-label={streamFs ? "خروج از تمام‌صفحهٔ استریم" : "تمام‌صفحهٔ استریم"}
+                    className="flex items-center gap-1 rounded-lg bg-black/60 px-2 py-1 text-[11px] font-semibold text-white backdrop-blur hover:bg-black/80"
+                  >
+                    <Icon name={streamFs ? "minimize" : "maximize"} size={13} />
+                    <span className="hidden sm:inline">{streamFs ? "کوچک‌نمایی" : "تمام‌صفحه"}</span>
+                  </button>
                   {voice.sharing ? (
                     <button onClick={() => void voice.stopShare()} className="rounded-lg bg-rose-500/80 px-2 py-1 text-[11px] font-bold text-white backdrop-blur hover:bg-rose-500">توقف اشتراک صفحهٔ من</button>
                   ) : (
@@ -513,16 +584,30 @@ export default function VoicePanel({ conversationId, me, detail, onClose, onOpen
             })}
           </div>
 
-          {myTrack && (
-            <div className="pointer-events-none absolute start-4 top-4 z-10 max-w-xs">
-              <div className="pointer-events-auto"><BotPlayer track={myTrack} mine volume={voice.prefs.master * ((voice.prefs.volumes[String(me.id)] ?? 100) / 100)} outputId={voice.prefs.outputId} serverTimeDelta={voice.serverTimeDelta} onPause={() => trackAction("pause")} onResume={() => trackAction("resume")} onStop={() => trackAction("stop")} /></div>
+          {voice.tracks.length > 0 && tab !== "bot" && (
+            <div className="pointer-events-none absolute start-3 top-3 z-10 flex max-w-xs flex-col gap-2 sm:start-4 sm:top-4">
+              {voice.tracks.map((tr) => (
+                <div key={tr.userId} className="pointer-events-auto">
+                  <BotPlayer
+                    track={tr}
+                    mine={tr.userId === me.id}
+                    canStop={isMod}
+                    volume={voice.prefs.master * ((voice.prefs.volumes[String(tr.userId)] ?? 100) / 100)}
+                    outputId={voice.prefs.outputId}
+                    serverTimeDelta={voice.serverTimeDelta}
+                    onPause={() => trackAction("pause")}
+                    onResume={() => trackAction("resume")}
+                    onStop={() => trackAction("stop", tr.userId)}
+                  />
+                </div>
+              ))}
             </div>
           )}
         </main>
 
         {/* side panel */}
         {tab && (
-          <aside className="anim-slide-panel flex w-80 shrink-0 flex-col border-s border-white/5 bg-[#1c1c1e] sm:w-96">
+          <aside className="anim-slide-panel fixed inset-0 z-30 flex w-full flex-col border-s border-white/5 bg-[#1c1c1e] sm:static sm:z-auto sm:w-88 sm:shrink-0">
             <div className="flex shrink-0 items-center gap-2 border-b border-white/5 p-2">
               {([["people", "users", "افراد"], ["bot", "bot", "ربات‌ها"], ["audio", "sliders", "تنظیمات"]]).map(([id, icon, label]) => (
                 <button key={id} onClick={() => setTab(id)} className={`flex h-9 flex-1 items-center justify-center gap-1.5 rounded-full text-xs font-bold transition ${tab === id ? "bg-white/10 text-white" : "text-white/50 hover:text-white"}`}>
@@ -559,23 +644,23 @@ export default function VoicePanel({ conversationId, me, detail, onClose, onOpen
               {tab === "bot" && (
                 <>
                   <div className="rounded-lg border border-white/5 bg-white/5 p-3">
-                    <div className="flex items-center gap-2"><Icon name="bot" size={17} className="text-[#8ab4f8]" /><p className="text-sm font-bold">ربات موسیقی شما</p></div>
-                    <p className="mt-1 text-[11px] leading-5 text-white/50">آهنگ مستقیم (mp3/ogg/wav) یا آپلود در تماس برای همه پخش می‌شود. لینک‌های Spotify/SoundCloud با پلیر رسمی باز می‌شوند.</p>
+                    <div className="flex items-center gap-2"><Icon name="bot" size={17} className="text-[#8ab4f8]" /><p className="text-sm font-bold">ربات موسیقی سرور</p></div>
+                    <p className="mt-1 text-[11px] leading-5 text-white/55">لینک آهنگ SoundCloud، لینک مستقیم فایل صوتی (mp3/m4a/ogg/wav) یا فایل آپلودی خود را بدهید؛ سرور آهنگ را دریافت و به‌صورت هماهنگ از خودش برای همه پخش می‌کند.</p>
                     {!canPlay && <p className="mt-2 rounded-xl border border-red-400/30 bg-red-500/10 p-2 text-[11px] text-red-300">مجوز پخش ربات شما غیرفعال است.</p>}
                     {canPlay && (
                       <div className="mt-3 space-y-2">
                         <div className="grid grid-cols-2 gap-1 rounded-xl bg-black/30 p-1">
-                          <button onClick={() => setSource("link")} className={`rounded-lg py-1.5 text-[11px] font-bold ${source === "link" ? "bg-white/10 text-white" : "text-white/50"}`}>لینک</button>
-                          <button onClick={() => setSource("file")} className={`rounded-lg py-1.5 text-[11px] font-bold ${source === "file" ? "bg-white/10 text-white" : "text-white/50"}`}>آپلود</button>
+                          <button onClick={() => setSource("link")} className={`rounded-lg py-1.5 text-[11px] font-bold ${source === "link" ? "bg-white/10 text-white" : "text-white/50"}`}>لینک موسیقی / SoundCloud</button>
+                          <button onClick={() => setSource("file")} className={`rounded-lg py-1.5 text-[11px] font-bold ${source === "file" ? "bg-white/10 text-white" : "text-white/50"}`}>آپلود فایل</button>
                         </div>
-                        {source === "link" ? <Input dir="ltr" placeholder="https://…/music.mp3" value={url} onChange={(e) => setUrl(e.target.value)} className="!border-white/10 !bg-black/30 !text-xs !text-white text-left" /> : <label className="block cursor-pointer rounded-xl border border-dashed border-white/15 p-3 text-center text-[11px] text-white/60 hover:border-[#8ab4f8]/40 hover:text-[#8ab4f8]"><input type="file" accept="audio/*,.mp3,.ogg,.m4a,.wav,.flac,.aac,.opus,.webm" className="hidden" onChange={(e) => setAudioFile(e.target.files?.[0] ?? null)} />{audioFile ? audioFile.name : "انتخاب فایل صوتی"}</label>}
-                        <Input placeholder="نام آهنگ (اختیاری)" value={title} onChange={(e) => setTitle(e.target.value)} className="!border-white/10 !bg-black/30 !text-xs !text-white" />
-                        <button disabled={busy} onClick={() => submitTrack()} className="flex w-full items-center justify-center gap-1.5 rounded-full bg-[#1a73e8] py-2 text-xs font-bold text-white disabled:opacity-50"><Icon name="play" size={13} />{busy ? "در حال آماده‌سازی…" : "پخش در جلسه"}</button>
+                        {source === "link" ? <Input dir="ltr" placeholder="https://soundcloud.com/... یا لینک مستقیم صوتی" value={url} onChange={(e) => setUrl(e.target.value)} className="!border-white/10 !bg-black/30 !text-xs !text-white text-left" /> : <label className="block cursor-pointer rounded-xl border border-dashed border-white/15 p-3 text-center text-[11px] text-white/60 hover:border-[#8ab4f8]/40 hover:text-[#8ab4f8]"><input type="file" accept="audio/*,.mp3,.ogg,.m4a,.wav,.flac,.aac,.opus,.webm" className="hidden" onChange={(e) => setAudioFile(e.target.files?.[0] ?? null)} />{audioFile ? audioFile.name : "انتخاب فایل صوتی"}</label>}
+                        <Input placeholder="نام دلخواه آهنگ (اختیاری)" value={title} onChange={(e) => setTitle(e.target.value)} className="!border-white/10 !bg-black/30 !text-xs !text-white" />
+                        <button disabled={busy} onClick={() => submitTrack()} className="flex w-full items-center justify-center gap-1.5 rounded-full bg-[#1a73e8] py-2.5 text-xs font-bold text-white disabled:opacity-50"><Icon name="play" size={13} />{busy ? "در حال دریافت آهنگ توسط سرور…" : "دریافت و پخش هماهنگ در اتاق"}</button>
                         <button onClick={() => void playDemo()} disabled={busy} className="flex w-full items-center justify-center gap-1.5 rounded-full border border-white/10 py-2 text-xs font-bold text-white/70 hover:text-white disabled:opacity-40"><Icon name="music" size={13} />پخش صدای نمونه</button>
                       </div>
                     )}
                   </div>
-                  {voice.tracks.length > 0 && <div className="space-y-2"><p className="px-1 text-[11px] font-bold text-white/45">ربات‌های فعال ({faNum(voice.tracks.length)})</p>{voice.tracks.map((track) => <BotPlayer key={track.userId} track={track} mine={track.userId === me.id} volume={voice.prefs.master * ((voice.prefs.volumes[String(track.userId)] ?? 100) / 100)} outputId={voice.prefs.outputId} serverTimeDelta={voice.serverTimeDelta} onPause={() => trackAction("pause")} onResume={() => trackAction("resume")} onStop={() => trackAction("stop", track.userId)} />)}</div>}
+                  {voice.tracks.length > 0 && <div className="space-y-2"><p className="px-1 text-[11px] font-bold text-white/45">ربات‌های فعال ({faNum(voice.tracks.length)})</p>{voice.tracks.map((track) => <BotPlayer key={track.userId} track={track} mine={track.userId === me.id} canStop={isMod} volume={voice.prefs.master * ((voice.prefs.volumes[String(track.userId)] ?? 100) / 100)} outputId={voice.prefs.outputId} serverTimeDelta={voice.serverTimeDelta} onPause={() => trackAction("pause")} onResume={() => trackAction("resume")} onStop={() => trackAction("stop", track.userId)} />)}</div>}
                 </>
               )}
               {tab === "audio" && (

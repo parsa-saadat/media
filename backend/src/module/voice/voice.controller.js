@@ -10,7 +10,7 @@ export const action = async (req, res) => {
   const chatId = req.id();
   switch (input.action) {
     case "join":
-      res.json(await voiceService.joinVoice(req.me, chatId));
+      res.json(await voiceService.joinVoice(req.me, chatId, input));
       return;
     case "leave":
       await voiceService.leaveVoice(req.me, chatId, input.joinToken);

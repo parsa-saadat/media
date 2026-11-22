@@ -274,6 +274,41 @@ const P = {
     </>
   ),
   bookmark: <path d="M6 3h12a1 1 0 0 1 1 1v17l-7-4-7 4V4a1 1 0 0 1 1-1z" />,
+  "user-plus": (
+    <>
+      <circle cx="9" cy="8" r="3.5" />
+      <path d="M2.5 20a6.5 6.5 0 0 1 13 0" />
+      <path d="M19 8v6M16 11h6" />
+    </>
+  ),
+  maximize: <path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3" />,
+  minimize: <path d="M8 3v3a2 2 0 0 1-2 2H3M21 8h-3a2 2 0 0 1-2-2V3M3 16h3a2 2 0 0 1 2 2v3M16 21v-3a2 2 0 0 1 2-2h3" />,
+  pip: (
+    <>
+      <rect x="2.5" y="4.5" width="19" height="15" rx="2.5" />
+      <rect x="11.5" y="11" width="8" height="6.5" rx="1.2" fill="currentColor" stroke="none" />
+    </>
+  ),
+  eye: (
+    <>
+      <path d="M2 12s3.5-6.5 10-6.5S22 12 22 12s-3.5 6.5-10 6.5S2 12 2 12z" />
+      <circle cx="12" cy="12" r="2.8" />
+    </>
+  ),
+  "eye-off": (
+    <>
+      <path d="M10.6 5.2A10.7 10.7 0 0 1 12 5.5C18.5 5.5 22 12 22 12a17.6 17.6 0 0 1-3.1 3.9M6.2 6.3C3.6 8.1 2 12 2 12s3.5 6.5 10 6.5a10.4 10.4 0 0 0 4.2-.9M3 3l18 18" />
+      <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+    </>
+  ),
+  menu: <path d="M4 7h16M4 12h16M4 17h16" />,
+  devices: (
+    <>
+      <rect x="2.5" y="4.5" width="14" height="10.5" rx="2" />
+      <path d="M6.5 18.5h6M9.5 15v3.5" />
+      <rect x="15" y="9.5" width="6.5" height="10.5" rx="1.5" />
+    </>
+  ),
 };
 
 export const ROOM_ICONS = [

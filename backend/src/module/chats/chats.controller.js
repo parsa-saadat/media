@@ -30,6 +30,11 @@ export const leave = async (req, res) => {
 };
 
 export const addMember = async (req, res) => {
+  if (Array.isArray(req.input.usernames)) {
+    const out = await chatsService.addMembersBatch(req.me, req.id(), req.input.usernames);
+    res.json({ ok: true, ...out });
+    return;
+  }
   await chatsService.addMember(req.me, req.id(), req.input.username);
   res.json({ ok: true });
 };

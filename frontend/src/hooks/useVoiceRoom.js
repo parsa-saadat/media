@@ -35,6 +35,7 @@ export function useVoiceRoom(conversationId, me) {
   const [prefs, setPrefs] = useState(DEFAULT_PREFS);
   const [serverTimeDelta, setServerTimeDelta] = useState(0);
   const [connectionCount, setConnectionCount] = useState(0);
+  const [conflictOtherDevice, setConflictOtherDevice] = useState(false);
 
   const prefsRef = useRef(prefs);
   const prefsReadyRef = useRef(false);
@@ -86,7 +87,7 @@ export function useVoiceRoom(conversationId, me) {
   const effectiveVolume = useCallback((userId) => {
     const p = prefsRef.current;
     const participant = participantsRef.current.find((item) => item.userId === userId);
-    if (participant && (!participant.micOn || participant.micMuted)) return 0;
+    if (participant?.micMuted) return 0;
     return Math.min(1, Math.max(0, (p.master / 100) * ((p.volumes[String(userId)] ?? 100) / 100)));
   }, []);
 
@@ -217,6 +218,7 @@ export function useVoiceRoom(conversationId, me) {
     let gain = null;
     try {
       context = new AudioContext();
+      if (context.state === "suspended") void context.resume().catch(() => {});
       const source = context.createMediaStreamSource(stream);
       gain = context.createGain();
       gain.gain.value = prefsRef.current.micGain / 100;
@@ -428,8 +430,9 @@ export function useVoiceRoom(conversationId, me) {
       restrictionsRef.current = data.myRestrictions;
       setServerTimeDelta(data.serverTime - Date.now());
       if (!data.participants.some((p) => p.userId === me.id && p.joinToken === myJoin)) {
-        toast("ارتباط تماس قطع شد؛ دوباره به تماس بپیوندید", "error");
+        toast("تماس شما در این پنجره پایان یافت (یا به دستگاه دیگری منتقل شد)", "info");
         joinedRef.current = "";
+        try { sessionStorage.removeItem(`inebuly-voice-token:${conversationId}`); } catch {}
         setStatus("idle");
         stopMic();
         for (const id of [...peersRef.current.keys()]) closePeer(id);
@@ -541,8 +544,10 @@ export function useVoiceRoom(conversationId, me) {
   const leave = useCallback(async () => {
     const token = joinedRef.current;
     joinedRef.current = "";
+    try { sessionStorage.removeItem(`inebuly-voice-token:${conversationId}`); } catch {}
     cursorRef.current = 0;
     setStatus("idle");
+    setConflictOtherDevice(false);
     setTracks([]);
     setParticipants([]);
     setMicOn(false);
@@ -553,7 +558,7 @@ export function useVoiceRoom(conversationId, me) {
     for (const id of [...peersRef.current.keys()]) closePeer(id);
     queuedIce.current.clear();
     if (token) try { await send({ action: "leave", joinToken: token }); } catch {}
-  }, [closePeer, send, stopMic]);
+  }, [closePeer, conversationId, send, stopMic]);
 
   // Leave whenever the voice panel closes or its conversation changes.
   useEffect(() => {
@@ -577,13 +582,46 @@ export function useVoiceRoom(conversationId, me) {
 
   useEffect(() => {
     if (status !== "joined") return;
+    let bc = null;
+    if (typeof BroadcastChannel !== "undefined") {
+      try {
+        bc = new BroadcastChannel(`inebuly-voice-${conversationId}`);
+        bc.onmessage = (ev) => {
+          if (ev.data?.type === "evict" && ev.data?.winnerJoinToken && ev.data.winnerJoinToken !== joinedRef.current) {
+            joinedRef.current = "";
+            try { sessionStorage.removeItem(`inebuly-voice-token:${conversationId}`); } catch {}
+            setStatus("idle");
+            stopMic();
+            stopShareInternal();
+            for (const id of [...peersRef.current.keys()]) closePeer(id);
+            toast("تماس به تب یا دستگاه جدید شما منتقل شد", "info");
+          }
+        };
+      } catch {
+        bc = null;
+      }
+    }
+    const unlock = () => {
+      if (contextRef.current?.state === "suspended") void contextRef.current.resume().catch(() => {});
+      for (const peer of peersRef.current.values()) {
+        if (peer.audio && peer.audio.paused) void peer.audio.play().catch(() => {});
+      }
+    };
+    document.addEventListener("pointerdown", unlock, { passive: true });
+    document.addEventListener("keydown", unlock, { passive: true });
     void poll();
     const ticker = setInterval(() => void poll(), 1400);
     const heartbeat = setInterval(() => {
       if (joinedRef.current) void send({ action: "heartbeat", joinToken: joinedRef.current }).catch(() => {});
     }, 5000);
-    return () => { clearInterval(ticker); clearInterval(heartbeat); };
-  }, [poll, send, status]);
+    return () => {
+      bc?.close();
+      document.removeEventListener("pointerdown", unlock);
+      document.removeEventListener("keydown", unlock);
+      clearInterval(ticker);
+      clearInterval(heartbeat);
+    };
+  }, [closePeer, conversationId, poll, send, status, stopMic]);
 
   /** Lobby: open the microphone before joining so the user can see the level meter and pick a device. */
   const previewMic = useCallback(async () => {
@@ -608,7 +646,11 @@ export function useVoiceRoom(conversationId, me) {
     if (joinedRef.current || status === "connecting") return;
     setStatus("connecting");
     setMicError("");
+    setConflictOtherDevice(false);
     const wantMic = options?.micEnabled ?? false;
+    const forceTakeover = options?.forceTakeover === true;
+    let savedJoinToken = "";
+    try { savedJoinToken = sessionStorage.getItem(`inebuly-voice-token:${conversationId}`) || ""; } catch {}
     if (me.permissions.includes("voice.speak") && !trackRef.current) {
       try { await acquireMic(prefsRef.current.inputId); }
       catch (err) {
@@ -617,9 +659,10 @@ export function useVoiceRoom(conversationId, me) {
       }
     }
     try {
-      const data = await send({ action: "join" });
+      const data = await send({ action: "join", joinToken: savedJoinToken, forceTakeover });
       if (!alive.current) return;
       joinedRef.current = data.joinToken;
+      try { sessionStorage.setItem(`inebuly-voice-token:${conversationId}`, data.joinToken); } catch {}
       cursorRef.current = data.cursor;
       participantsRef.current = data.participants;
       setParticipants(data.participants);
@@ -628,9 +671,17 @@ export function useVoiceRoom(conversationId, me) {
       restrictionsRef.current = data.myRestrictions;
       setServerTimeDelta(data.serverTime - Date.now());
       setStatus("joined");
+      if (forceTakeover && typeof BroadcastChannel !== "undefined") {
+        try {
+          const bc = new BroadcastChannel(`inebuly-voice-${conversationId}`);
+          bc.postMessage({ type: "evict", winnerJoinToken: data.joinToken });
+          bc.close();
+        } catch {}
+      }
       if (typeof RTCPeerConnection === "undefined") setMicError("مرورگر شما WebRTC ندارد؛ موسیقی کار می‌کند اما تماس میکروفونی در دسترس نیست.");
       if (wantMic && trackRef.current && me.permissions.includes("voice.speak") && !data.myRestrictions.micMuted) {
         try {
+          if (contextRef.current?.state === "suspended") await contextRef.current.resume().catch(() => {});
           await send({ action: "mic", joinToken: data.joinToken, on: true });
           micOnRef.current = true;
           trackRef.current.enabled = true;
@@ -638,9 +689,17 @@ export function useVoiceRoom(conversationId, me) {
           setMicOn(true);
         } catch { /* stays muted */ }
       }
-      toast("به تماس صوتی پیوستید", "success");
-    } catch (err) { stopMic(); setStatus("idle"); toast(err.message, "error"); }
-  }, [acquireMic, me.permissions, send, status, stopMic]);
+      toast(forceTakeover ? "دستگاه قبلی قطع شد و با این دستگاه وارد شدید" : "به تماس صوتی پیوستید", "success");
+    } catch (err) {
+      stopMic();
+      setStatus("idle");
+      if (err?.body?.code === "ALREADY_IN_VOICE_OTHER_DEVICE") {
+        setConflictOtherDevice(true);
+      } else {
+        toast(err.message, "error");
+      }
+    }
+  }, [acquireMic, conversationId, me.permissions, send, status, stopMic]);
 
   const toggleMic = useCallback(async () => {
     if (!joinedRef.current) return;
@@ -649,6 +708,7 @@ export function useVoiceRoom(conversationId, me) {
       try { await acquireMic(prefsRef.current.inputId); setMicError(""); }
       catch { setMicError("دسترسی به میکروفون داده نشد. تنظیمات مرورگر را بررسی کنید."); return; }
     }
+    if (contextRef.current?.state === "suspended") await contextRef.current.resume().catch(() => {});
     const next = !micOnRef.current;
     try {
       await send({ action: "mic", joinToken: joinedRef.current, on: next });
@@ -701,6 +761,7 @@ export function useVoiceRoom(conversationId, me) {
     status, join, leave, previewMic, stopPreview, participants, tracks, restrictions, micOn, micError,
     speaking, sharing, shareQuality, shareError, remoteVideos, localScreen, startShare, stopShare,
     devices, prefs, serverTimeDelta, connectionCount, joinToken: joinedRef.current,
+    conflictOtherDevice, clearConflict: () => setConflictOtherDevice(false),
     toggleMic, changeInput, changeOutput, setMaster, setMicGain, setVolume, enableAudio,
     refreshDevices,
   };

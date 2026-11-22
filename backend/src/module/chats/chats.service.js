@@ -231,6 +231,40 @@ export async function addMember(me, chatId, username) {
   await postSystemMessage(chatId, `${me.displayName}، ${user.displayName} را اضافه کرد`);
 }
 
+export async function addMembersBatch(me, chatId, usernames) {
+  const { chat, membership } = await requireMember(chatId, me);
+  if (chat.type === "direct" || chat.type === "saved") throw new HttpError(400, "به این گفتگو نمی‌توان عضو اضافه کرد");
+  if (chat.type === "group" && membership.role === "member") {
+    throw new HttpError(403, "فقط مدیران گروه می‌توانند عضو اضافه کنند");
+  }
+  if (!usernames.length) throw new HttpError(400, "حداقل یک دوست یا نام کاربری را انتخاب کنید");
+  const users = await findUsers({ username: { $in: usernames } });
+  if (!users.length) throw new HttpError(404, "کاربری با این مشخصات پیدا نشد");
+  const blocked = await blockedIdsOf(me.id);
+  const addedNames = [];
+  for (const user of users) {
+    if (user._id === me.id || blocked.has(user._id)) continue;
+    try {
+      await assertNotBlocked(me.id, user._id);
+      if (await addChatMember(chatId, newMember(user._id, "member"))) {
+        addedNames.push(user.displayName);
+      }
+    } catch {
+      /* skip blocked or already member */
+    }
+  }
+  if (!addedNames.length) {
+    throw new HttpError(409, "افراد انتخاب‌شده قبلاً عضو گروه هستند یا امکان افزودنشان وجود ندارد");
+  }
+  await postSystemMessage(
+    chatId,
+    addedNames.length === 1
+      ? `${me.displayName}، ${addedNames[0]} را به گروه اضافه کرد`
+      : `${me.displayName}، ${addedNames.join("، ")} را به گروه اضافه کرد`,
+  );
+  return { added: addedNames };
+}
+
 export async function manageMember(me, chatId, input) {
   const { chat, membership } = await requireMember(chatId, me);
   if (chat.type === "direct" || chat.type === "saved") throw new HttpError(400, "درخواست نامعتبر است");

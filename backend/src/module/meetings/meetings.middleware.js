@@ -73,7 +73,7 @@ export const validateMeetingAction = (req) => {
     };
   } else if (action === "game-create") {
     input = { action, joinToken, game: text(req.body.game, 16) };
-  } else if (["game-join", "game-start", "game-close"].includes(action)) {
+  } else if (["game-join", "game-spectate", "game-start", "game-rematch", "game-close"].includes(action)) {
     input = { action, joinToken };
   } else if (action === "game-move") {
     input = { action, joinToken, move: req.body.move ?? {} };

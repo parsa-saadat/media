@@ -88,12 +88,15 @@ export async function createGame(meeting, participant, type) {
   if (!GAME_TYPES.includes(type)) throw new HttpError(400, "بازی ناشناخته است");
   const current = await findOneGame({ meetingId: meeting._id, status: { $in: ["waiting", "playing"] } });
   if (current) throw new HttpError(409, "یک بازی در این جلسه از قبل باز است");
+  // Clean up any finished game before starting a new one
+  await deleteGames({ meetingId: meeting._id });
   return insertGame({
     meetingId: meeting._id,
     type,
     label: GAME_LABELS[type],
     status: "waiting",
     players: [{ joinToken: participant.joinToken, name: participant.name, avatarColor: participant.avatarColor }],
+    spectators: [],
     maxPlayers: MAX_PLAYERS[type],
     host: participant.joinToken,
     turn: null,
@@ -118,6 +121,7 @@ export function publicGame(game) {
     label: game.label,
     status: game.status,
     players: game.players,
+    spectators: game.spectators ?? [],
     maxPlayers: game.maxPlayers,
     host: game.host,
     turn: game.turn,
@@ -135,16 +139,77 @@ export async function activeGame(meetingId) {
 
 export async function joinGame(meeting, participant) {
   const game = await activeGame(meeting._id);
-  if (!game) throw new HttpError(404, "بازی بازی فعالی نیست");
-  if (game.status !== "waiting") throw new HttpError(409, "بازی شروع شده است");
+  if (!game) throw new HttpError(404, "بازی فعالی نیست");
+  if (game.status !== "waiting") throw new HttpError(409, "بازی شروع شده است؛ می‌توانید آن را تماشا کنید");
   if (tokenOf(game, participant.joinToken) >= 0) throw new HttpError(409, "شما داخل بازی هستید");
-  if (game.players.length >= game.maxPlayers) throw new HttpError(409, "ظرفیت بازی پر است");
+  if (game.players.length >= game.maxPlayers) throw new HttpError(409, "ظرفیت بازی پر است؛ می‌توانید به‌عنوان تماشاگر بازی را ببینید");
+  const spectators = (game.spectators ?? []).filter((s) => s.joinToken !== participant.joinToken);
   game.players.push({ joinToken: participant.joinToken, name: participant.name, avatarColor: participant.avatarColor });
   const state = game.state;
   if (game.type === "snakes") state.positions.push(0);
   if (game.type === "ludo") state.tokens.push([-1, -1, -1, -1]);
-  const updated = await updateOneGame({ _id: game._id }, { players: game.players, state });
+  const updated = await updateOneGame({ _id: game._id }, { players: game.players, spectators, state });
   return { game: publicGame(updated), joined: participant.name };
+}
+
+export async function spectateGame(meeting, participant) {
+  const game = await activeGame(meeting._id);
+  if (!game) throw new HttpError(404, "بازی فعالی نیست");
+  if (tokenOf(game, participant.joinToken) >= 0) {
+    // If still waiting and not host, allow switching from player seat to spectator!
+    if (game.status === "waiting" && game.host !== participant.joinToken) {
+      const idx = tokenOf(game, participant.joinToken);
+      const players = game.players.filter((_, i) => i !== idx);
+      const state = game.state;
+      if (game.type === "snakes") state.positions.splice(idx, 1);
+      if (game.type === "ludo") state.tokens.splice(idx, 1);
+      const spectators = [...(game.spectators ?? []).filter((s) => s.joinToken !== participant.joinToken), {
+        joinToken: participant.joinToken,
+        name: participant.name,
+        avatarColor: participant.avatarColor,
+      }];
+      const updated = await updateOneGame({ _id: game._id }, { players, spectators, state });
+      return { game: publicGame(updated) };
+    }
+    return { game: publicGame(game) };
+  }
+  const spectators = game.spectators ?? [];
+  if (!spectators.some((s) => s.joinToken === participant.joinToken)) {
+    spectators.push({ joinToken: participant.joinToken, name: participant.name, avatarColor: participant.avatarColor });
+    const updated = await updateOneGame({ _id: game._id }, { spectators });
+    return { game: publicGame(updated) };
+  }
+  return { game: publicGame(game) };
+}
+
+export async function rematchGame(meeting, participant) {
+  const game = await activeGame(meeting._id);
+  if (!game) throw new HttpError(404, "بازی فعالی نیست");
+  const isHostOfMeeting = participant.userId !== null && participant.userId === meeting.hostId;
+  if (game.host !== participant.joinToken && !isHostOfMeeting && tokenOf(game, participant.joinToken) < 0) {
+    throw new HttpError(403, "فقط بازیکنان یا میزبان می‌توانند دست جدید را شروع کنند");
+  }
+  if (game.status !== "finished") throw new HttpError(409, "بازی هنوز تمام نشده است");
+  const seats = game.players.length;
+  if (seats < 2) {
+    await deleteGames({ _id: game._id });
+    return { game: null };
+  }
+  // Rotate starting turn fairly on rematch
+  const rotatedPlayers = [...game.players.slice(1), game.players[0]];
+  const state = initialFor(game.type, seats);
+  const updated = await updateOneGame(
+    { _id: game._id },
+    {
+      status: "playing",
+      players: rotatedPlayers,
+      turn: rotatedPlayers[0].joinToken,
+      winner: null,
+      state,
+      lastEvent: "دست جدید شروع شد",
+    },
+  );
+  return { game: publicGame(updated) };
 }
 
 export async function startGame(meeting, participant) {
@@ -181,8 +246,14 @@ export async function closeActive(meetingId) {
 export async function removeParticipantFromGames(meetingId, joinToken) {
   const game = await activeGame(meetingId);
   if (!game) return;
+  const spectators = (game.spectators ?? []).filter((s) => s.joinToken !== joinToken);
   const index = tokenOf(game, joinToken);
-  if (index < 0) return;
+  if (index < 0) {
+    if (spectators.length !== (game.spectators ?? []).length) {
+      await updateOneGame({ _id: game._id }, { spectators });
+    }
+    return;
+  }
   const rest = game.players.filter((_, i) => i !== index);
   if (game.status === "waiting" || rest.length < 2) {
     await deleteGames({ _id: game._id });
@@ -199,6 +270,7 @@ export async function removeParticipantFromGames(meetingId, joinToken) {
     { _id: game._id },
     {
       players: rest,
+      spectators,
       state,
       turn,
       status: game.type === "tictactoe" ? "playing" : game.status,
@@ -226,10 +298,10 @@ export async function applyMove(meeting, participant, move) {
     state.cells[cell] = seat === 0 ? "X" : "O";
     const result = tictactoeLines(state.cells);
     if (result === "draw") {
-      Object.assign(patch, { status: "finished", winner: null, turn: null, lastEvent: "مساوی شد" });
+      Object.assign(patch, { status: "finished", winner: null, turn: null, state, lastEvent: "مساوی شد" });
       event = "مساوی";
     } else if (result) {
-      Object.assign(patch, { status: "finished", winner: participant.joinToken, turn: null, lastEvent: `${participant.name} برد` });
+      Object.assign(patch, { status: "finished", winner: participant.joinToken, turn: null, state, lastEvent: `${participant.name} برد` });
       event = "برد";
     } else {
       const next = game.players[(seat + 1) % game.players.length].joinToken;
@@ -246,9 +318,9 @@ export async function applyMove(meeting, participant, move) {
     const rollSeq = (state.rollSeq ?? 0) + 1;
     state.rollSeq = rollSeq;
     if (pos === 100) {
-      Object.assign(patch, { status: "finished", winner: participant.joinToken, turn: null, lastEvent: `${participant.name} برنده شد` });
       state.positions[seat] = 100;
       state.last = { seq: rollSeq, seat, name: participant.name, dice, from, mid: 100, to: 100, note: "پیروزی" };
+      Object.assign(patch, { status: "finished", winner: participant.joinToken, turn: null, state, lastEvent: `${participant.name} برنده شد` });
       event = "برد";
     } else {
       if (LADDERS[pos]) {

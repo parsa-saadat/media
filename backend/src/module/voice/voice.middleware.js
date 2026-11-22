@@ -10,7 +10,7 @@ export const validateVoiceAction = (req) => {
   let input;
 
   if (action === "join") {
-    input = { action };
+    input = { action, joinToken, forceTakeover: req.body.forceTakeover === true };
   } else if (action === "leave" || action === "heartbeat") {
     input = { action, joinToken };
   } else if (action === "mic") {

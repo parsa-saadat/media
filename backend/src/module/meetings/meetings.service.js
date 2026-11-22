@@ -22,7 +22,7 @@ import {
   upsertParticipant,
 } from "../../model/controller/meetings/meetings.controller.js";
 import { insertMessage } from "../../model/controller/messages/messages.controller.js";
-import { findOneUser } from "../../model/controller/users/users.controller.js";
+import { findOneUser, findUsersByIds } from "../../model/controller/users/users.controller.js";
 import { getOrCreateDirect } from "../chats/chats.service.js";
 import { touchChat } from "../../model/controller/chats/chats.controller.js";
 import { listFriends } from "../contacts/contacts.service.js";
@@ -188,8 +188,15 @@ export async function joinMeeting(me, meeting, input) {
   const usedNames = new Set(afterEvictLive.map((p) => p.name));
 
   if (existing) {
+    // Preserve existing participant's lobby status (don't auto-admit someone who refreshed while waiting in lobby!)
+    const keepLobby = existing.inLobby && !isHost(meeting, me);
+    // Clear stale signals addressed to/from this participant so peers cleanly renegotiate if needed
+    await deleteMeetingSignals({ meetingId: meeting._id, $or: [{ from: joinToken }, { to: joinToken }] });
     await upsertParticipant(meeting._id, joinToken, {
-      inLobby: false,
+      inLobby: keepLobby,
+      micOn: false,
+      sharingOn: false,
+      cameraOn: false,
       ...(input.browserId ? { browserId: input.browserId } : {}),
       lastSeenAt: new Date(),
     });
@@ -257,12 +264,16 @@ async function snapshot(meeting, joinToken, after = 0) {
   const all = await findParticipants({ meetingId: meeting._id, lastSeenAt: alive() });
   // Lobby waiters are only visible to the host.
   const visible = all.filter((p) => !p.inLobby || isHostByToken(all, meeting, mine));
+  const userIds = [...new Set(visible.map((p) => p.userId).filter((id) => typeof id === "number"))];
+  const userDocs = userIds.length ? await findUsersByIds(userIds) : [];
+  const avatarByUserId = new Map(userDocs.map((u) => [u._id, u.avatarFileId ?? null]));
   const participants = visible
     .sort((a, b) => Number(b.userId !== null) - Number(a.userId !== null) || a.name.localeCompare(b.name, "fa"))
     .map((p) => ({
       joinToken: p.joinToken,
       name: p.name,
       avatarColor: p.avatarColor,
+      avatarFileId: p.userId !== null ? (avatarByUserId.get(p.userId) ?? null) : null,
       userId: p.userId,
       isGuest: p.isGuest,
       inLobby: p.inLobby,
@@ -361,8 +372,14 @@ export async function meetingAction(me, meeting, input) {
   if (input.action === "game-join") {
     return games.joinGame(meeting, actor);
   }
+  if (input.action === "game-spectate") {
+    return games.spectateGame(meeting, actor);
+  }
   if (input.action === "game-start") {
     return games.startGame(meeting, actor);
+  }
+  if (input.action === "game-rematch") {
+    return games.rematchGame(meeting, actor);
   }
   if (input.action === "game-move") {
     return games.applyMove(meeting, actor, input.move);

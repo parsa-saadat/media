@@ -31,7 +31,15 @@ export const validateUpdateChat = (req) => {
 };
 
 export const validateAddMember = (req) => {
-  req.input = { username: normalizeUsername(text(req.body.username, 64)) };
+  const rawList = Array.isArray(req.body.usernames) ? req.body.usernames.slice(0, 50) : null;
+  if (rawList) {
+    req.input = {
+      usernames: [...new Set(rawList.map((u) => normalizeUsername(text(u, 64))).filter(Boolean))],
+      username: "",
+    };
+    return;
+  }
+  req.input = { username: normalizeUsername(text(req.body.username, 64)), usernames: null };
 };
 
 export const validateMemberAction = (req) => {

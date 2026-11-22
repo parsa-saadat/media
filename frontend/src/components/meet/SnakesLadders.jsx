@@ -235,7 +235,13 @@ export default function SnakesLadders({ game, myToken, onMove, busy, rolling }) 
           rolling={rolling}
           disabled={!myTurn || busy || hopSeat !== null}
           onRoll={() => onMove({ action: "roll" })}
-          label={myTurn ? "نوبت شماست — تاس بریزید" : `نوبت ${game.players.find((p) => p.joinToken === game.turn)?.name ?? ""}`}
+          label={
+            myTurn
+              ? "نوبت شماست — تاس بریزید"
+              : game.players.some((p) => p.joinToken === myToken)
+                ? `نوبت ${game.players.find((p) => p.joinToken === game.turn)?.name ?? ""}`
+                : `تماشا · نوبت ${game.players.find((p) => p.joinToken === game.turn)?.name ?? ""}`
+          }
         />
       )}
     </div>

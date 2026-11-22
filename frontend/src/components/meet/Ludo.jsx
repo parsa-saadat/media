@@ -441,10 +441,10 @@ export default function Ludo({ game, myToken, onMove, busy, rolling }) {
             rolled
               ? myTurn
                 ? `تاس ${faNum(dice)} آمد — روی مهرهٔ چشمک‌زن بزنید`
-                : `${turnPlayerName} در حال انتخاب مهره (${faNum(dice)})`
+                : `${mySeat < 0 ? "تماشا · " : ""}${turnPlayerName} در حال انتخاب مهره (${faNum(dice)})`
               : myTurn
                 ? "نوبت شماست — تاس بیندازید"
-                : `نوبت ${turnPlayerName}`
+                : `${mySeat < 0 ? "تماشا · " : ""}نوبت ${turnPlayerName}`
           }
         />
       )}

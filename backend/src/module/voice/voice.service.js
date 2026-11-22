@@ -1,7 +1,8 @@
-import { findOneFile } from "../../model/controller/storage/storage.controller.js";
+import { findOneFile, insertFile } from "../../model/controller/storage/storage.controller.js";
 import { findUsersByIds } from "../../model/controller/users/users.controller.js";
 import {
   deletePresences,
+  deleteSignals,
   findLastSignal,
   findOnePresence,
   findOneRestriction,
@@ -18,9 +19,9 @@ import {
   upsertTrack,
   voiceKey,
 } from "../../model/controller/voice/voice.controller.js";
+import { resolveAndDownloadBotAudio } from "../../utils/audio/audioExtractor.js";
 import { generateJoinToken } from "../../utils/generators/token.generator.js";
 import { HttpError } from "../../utils/http/http.util.js";
-import { parseAudioSource } from "../../utils/validators/audio.validator.js";
 import { isAudioMime } from "../../utils/validators/file.validator.js";
 import { requireMember } from "../chats/chats.service.js";
 import { assertNotBlocked, blockedIdsOf } from "../contacts/contacts.service.js";
@@ -46,9 +47,11 @@ async function ownRestrictions(chatId, userId) {
 }
 
 async function requirePresence(chatId, userId, joinToken) {
-  if (!joinToken) throw new HttpError(409, "ابتدا به تماس بپیوندید");
+  if (!joinToken) throw new HttpError(409, "ابتدا به تماس بپیوندید", { code: "NOT_IN_VOICE" });
   const present = await findOnePresence({ _id: voiceKey(chatId, userId), joinToken, lastSeenAt: alive() });
-  if (!present) throw new HttpError(409, "تماس پایان یافته یا از پنجرهٔ دیگری باز شده است");
+  if (!present) {
+    throw new HttpError(409, "تماس پایان یافته یا به دستگاه/تب دیگری منتقل شده است", { code: "VOICE_EVICTED" });
+  }
 }
 
 /** Everything a client needs on each poll: who is in the call, the bots, and WebRTC signals addressed to me. */
@@ -100,6 +103,7 @@ async function snapshot(me, chatId, after) {
       {
         userId: track.userId,
         kind: track.kind,
+        originKind: track.originKind ?? track.kind,
         url: track.url,
         fileId: track.fileId,
         title: track.title,
@@ -124,8 +128,37 @@ export async function getSnapshot(me, chatId, after) {
   return snapshot(me, chatId, after);
 }
 
-export async function joinVoice(me, chatId) {
+export async function joinVoice(me, chatId, input = {}) {
   await requireVoiceRoom(me, chatId);
+  const existing = await findOnePresence({ _id: voiceKey(chatId, me.id), lastSeenAt: alive() });
+
+  // Same-tab reload reconnect: if caller already holds the active joinToken, keep their slot seamlessly
+  if (existing && input.joinToken && existing.joinToken === input.joinToken) {
+    await deleteSignals({ conversationId: chatId, $or: [{ fromUserId: me.id }, { toUserId: me.id }] });
+    await upsertPresence(chatId, me.id, {
+      joinToken: existing.joinToken,
+      micOn: false,
+      sharingOn: false,
+      shareQuality: "720p",
+      lastSeenAt: new Date(),
+    });
+    const baseline = (await findLastSignal({ conversationId: chatId, toUserId: me.id }))?._id ?? 0;
+    return { joinToken: existing.joinToken, ...(await snapshot(me, chatId, baseline)), cursor: baseline };
+  }
+
+  // Active in another tab or device: ask for explicit takeover unless forceTakeover is true
+  if (existing && !input.forceTakeover) {
+    throw new HttpError(
+      409,
+      "شما هم‌اکنون با تب یا دستگاه دیگری در این تماس صوتی حضور دارید.",
+      { code: "ALREADY_IN_VOICE_OTHER_DEVICE" },
+    );
+  }
+
+  if (existing) {
+    await deleteSignals({ conversationId: chatId, $or: [{ fromUserId: me.id }, { toUserId: me.id }] });
+  }
+
   // Remember the newest signal that existed before joining, so offers that arrive while we are
   // joining are delivered on the first poll instead of being skipped.
   const baseline = (await findLastSignal({ conversationId: chatId, toUserId: me.id }))?._id ?? 0;
@@ -237,22 +270,40 @@ export async function trackAction(me, chatId, input) {
   let url = null;
   let fileId = null;
   let suggestedTitle;
+  let originKind = null;
   if (input.fileId) {
     const file = await findOneFile({ _id: input.fileId });
     if (!file || file.uploaderId !== me.id || !isAudioMime(file.mime)) {
       throw new HttpError(400, "فایل باید صوتی و متعلق به شما باشد");
     }
     kind = "upload";
+    originKind = "upload";
     fileId = file._id;
     suggestedTitle = file.name;
   } else {
-    const source = parseAudioSource(input.url);
-    kind = source.kind;
-    url = source.url;
-    suggestedTitle = source.suggestedTitle;
+    // Server-side extraction & download: SoundCloud or direct audio URLs are fetched by our backend
+    // and stored in GridFS so all listeners stream native synchronized audio directly from our server!
+    const extracted = await resolveAndDownloadBotAudio(input.url);
+    const safeName = `${(input.title || extracted.title || "bot-track").slice(0, 80)}.${extracted.ext}`;
+    const stored = await insertFile(
+      {
+        name: safeName,
+        mime: extracted.mime,
+        size: extracted.buffer.byteLength,
+        uploaderId: me.id,
+        purpose: "bot-audio",
+      },
+      extracted.buffer,
+    );
+    kind = "upload";
+    originKind = extracted.sourceKind; // "soundcloud" | "url"
+    fileId = stored._id;
+    url = null;
+    suggestedTitle = extracted.title;
   }
   await upsertTrack(chatId, me.id, {
     kind,
+    originKind,
     url,
     fileId,
     title: input.title || suggestedTitle,
@@ -263,5 +314,5 @@ export async function trackAction(me, chatId, input) {
   });
   // The audio file of the replaced track is no longer needed.
   if (previous?.fileId && previous.fileId !== fileId) await removeUnusedFiles([previous.fileId]);
-  return kind;
+  return originKind || kind;
 }
