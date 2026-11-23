@@ -24,6 +24,8 @@ router.post("/conversations/:id/leave", authenticateToken, chatsController.leave
 router.post("/conversations/:id/members", authenticateToken, validateAddMember, chatsController.addMember);
 router.patch("/conversations/:id/members", authenticateToken, validateMemberAction, chatsController.manageMember);
 router.post("/conversations/:id/read", authenticateToken, validateRead, chatsController.read);
+router.post("/conversations/:id/typing", authenticateToken, chatsController.typing);
+router.get("/conversations/:id/typing", authenticateToken, chatsController.typingList);
 
 router.get("/rooms", authenticateToken, chatsController.rooms);
 router.post("/direct", authenticateToken, validateDirect, chatsController.direct);

@@ -178,7 +178,7 @@ export function ContextMenu({ state, onClose }) {
         ref={rootRef}
         dir="rtl"
         role="menu"
-        className="anim-pop fixed z-[95] min-w-60 max-w-xs space-y-0.5 overflow-hidden rounded-xl border border-line bg-surface p-1.5 shadow-[0_18px_50px_rgba(0,0,0,.6)] ring-1 ring-black/30"
+        className="popover-blur context-glass anim-pop fixed z-[95] min-w-60 max-w-xs space-y-0.5 overflow-hidden rounded-2xl border border-line p-1.5 shadow-[0_18px_50px_rgba(0,0,0,.6)] ring-1 ring-white/10"
         style={{
           left: (pos ?? { x, y }).x,
           top: (pos ?? { x, y }).y,

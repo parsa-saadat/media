@@ -2,8 +2,18 @@
 <html lang="fa" dir="rtl" data-theme="violet">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#06040b" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#06040b" id="meta-theme-color" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="inebuly" />
+    <meta name="application-name" content="inebuly" />
+    <meta name="description" content="inebuly — پیام‌رسان، جلسه‌های صوتی و تصویری پایدار، اشتراک صفحه و بازی‌های گروهی زنده" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
     <title>inebuly</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -11,15 +21,72 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Amiri+Quran&family=Amiri:wght@400;700&family=Vazirmatn:wght@300;400;500;600;700;800;900&display=swap"
     />
+    <style>
+      #boot-splash {
+        min-height: 100dvh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
+        background: var(--boot-bg, #06040b);
+        color: var(--boot-fg, #f3eeff);
+        font-family: "Vazirmatn", system-ui, sans-serif;
+      }
+      #boot-spinner {
+        width: 38px;
+        height: 38px;
+        border-radius: 9999px;
+        border: 3px solid color-mix(in srgb, var(--boot-accent, #8b5cf6) 24%, transparent);
+        border-top-color: var(--boot-accent, #8b5cf6);
+        animation: bootSpin 0.85s linear infinite;
+      }
+      @keyframes bootSpin {
+        to { transform: rotate(360deg); }
+      }
+    </style>
     <script>
       try {
-        var saved = localStorage.getItem("voxsy-theme");
-        if (saved) document.documentElement.setAttribute("data-theme", saved);
+        var THEME_MAP = {
+          violet: { bg: "#06040b", fg: "#f3eeff", accent: "#8b5cf6" },
+          glass: { bg: "#050814", fg: "#f1f7ff", accent: "#38bdf8" },
+          midnight: { bg: "#03060d", fg: "#eaf1ff", accent: "#3b82f6" },
+          emerald: { bg: "#030907", fg: "#e9fff5", accent: "#10b981" },
+          crimson: { bg: "#0a0405", fg: "#fff0f2", accent: "#f43f5e" },
+          gold: { bg: "#080604", fg: "#fff8ea", accent: "#f59e0b" },
+          lavender: { bg: "#f4f1fd", fg: "#1a1430", accent: "#7c3aed" },
+          "sky-light": { bg: "#f0f6ff", fg: "#0f1b2d", accent: "#0284c7" },
+          "emerald-light": { bg: "#f0fbf7", fg: "#0d241c", accent: "#059669" },
+          "lavender-dark": { bg: "#07050f", fg: "#f3effe", accent: "#a78bfa" }
+        };
+        var saved = localStorage.getItem("voxsy-theme") || "violet";
+        var rawCfg = null;
+        try { rawCfg = JSON.parse(localStorage.getItem("voxsy-theme-config") || "null"); } catch (e) {}
+        document.documentElement.setAttribute("data-theme", saved);
+        var pal = THEME_MAP[saved] || THEME_MAP.violet;
+        if (rawCfg && (rawCfg.mode === "light" || rawCfg.mode === "dark")) {
+          document.documentElement.setAttribute("data-mode", rawCfg.mode);
+          document.documentElement.setAttribute("data-glass", rawCfg.glass ? "true" : "false");
+          if (!rawCfg.presetId) {
+            pal = rawCfg.mode === "light"
+              ? { bg: "#f6f7fb", fg: "#141826", accent: rawCfg.customColor || pal.accent }
+              : { bg: "#05060d", fg: "#f3f5ff", accent: rawCfg.customColor || pal.accent };
+          }
+        }
+        document.documentElement.style.setProperty("--boot-bg", pal.bg);
+        document.documentElement.style.setProperty("--boot-fg", pal.fg);
+        document.documentElement.style.setProperty("--boot-accent", pal.accent);
+        var meta = document.getElementById("meta-theme-color");
+        if (meta) meta.setAttribute("content", pal.bg);
       } catch (e) {}
     </script>
   </head>
   <body class="antialiased">
-    <div id="root"></div>
+    <div id="root">
+      <div id="boot-splash" aria-busy="true">
+        <div id="boot-spinner"></div>
+      </div>
+    </div>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

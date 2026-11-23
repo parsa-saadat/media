@@ -26,3 +26,8 @@ export const bulkRemove = async (req, res) => {
 export const save = async (req, res) => {
   res.json(await messagesService.saveMessageToVault(req.me, req.id()), "در پیام‌های ذخیره‌شده قرار گرفت");
 };
+
+export const forward = async (req, res) => {
+  res.json(await messagesService.forwardMessages(req.me, req.input), "پیام فوروارد شد");
+};
+

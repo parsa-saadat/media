@@ -34,6 +34,46 @@ import { removeUnusedFiles, stopTracks } from "../storage/storage.service.js";
 
 const ROLE_ORDER = { owner: 0, admin: 1, member: 2 };
 
+/** Ephemeral live typing state: chatId -> Map<userId, { id, displayName, avatarColor, at }> */
+const TYPING_TTL_MS = 4500;
+const typingMap = new Map();
+
+export function setTypingState(chatId, user, typing) {
+  let byChat = typingMap.get(chatId);
+  if (!typing) {
+    byChat?.delete(user.id);
+    if (byChat && byChat.size === 0) typingMap.delete(chatId);
+    return;
+  }
+  if (!byChat) {
+    byChat = new Map();
+    typingMap.set(chatId, byChat);
+  }
+  byChat.set(user.id, {
+    id: user.id,
+    displayName: user.displayName,
+    avatarColor: user.avatarColor,
+    at: Date.now(),
+  });
+}
+
+export function getActiveTypers(chatId, excludeUserId, blockedSet = new Set()) {
+  const byChat = typingMap.get(chatId);
+  if (!byChat || byChat.size === 0) return [];
+  const now = Date.now();
+  const out = [];
+  for (const [uid, entry] of byChat.entries()) {
+    if (now - entry.at > TYPING_TTL_MS) {
+      byChat.delete(uid);
+      continue;
+    }
+    if (uid === excludeUserId || blockedSet.has(uid)) continue;
+    out.push({ id: entry.id, displayName: entry.displayName, avatarColor: entry.avatarColor });
+  }
+  if (byChat.size === 0) typingMap.delete(chatId);
+  return out;
+}
+
 const newMember = (userId, role) => ({
   userId,
   role,
@@ -115,6 +155,7 @@ export async function listChats(me) {
         peer,
         updatedAt: chat.updatedAt,
         unread: isSaved ? 0 : (unread.get(chat._id) ?? 0),
+        typingUsers: isSaved ? [] : getActiveTypers(chat._id, me.id, blocked),
         lastMessage: last
           ? {
               id: last._id,
@@ -122,7 +163,10 @@ export async function listChats(me) {
               content: last.content,
               fileIds: Array.isArray(last.fileIds) ? last.fileIds : last.fileId ? [last.fileId] : [],
               createdAt: last.createdAt,
+              senderId: last.senderId ?? null,
               senderName: last.senderId ? people.get(last.senderId)?.displayName ?? null : null,
+              senderColor: last.senderId ? people.get(last.senderId)?.avatarColor ?? null : null,
+              senderAvatarFileId: last.senderId ? people.get(last.senderId)?.avatarFileId ?? null : null,
             }
           : null,
       },
@@ -358,6 +402,21 @@ export async function getOrCreateSaved(userId) {
     if (winner) return winner;
     throw error;
   }
+}
+
+export async function setTyping(me, chatId, isTyping) {
+  const { chat } = await requireMember(chatId, me);
+  if (chat.type === "saved") return { typingUsers: [] };
+  setTypingState(chatId, me, Boolean(isTyping));
+  const blocked = await blockedIdsOf(me.id);
+  return { typingUsers: getActiveTypers(chatId, me.id, blocked) };
+}
+
+export async function getTyping(me, chatId) {
+  const { chat } = await requireMember(chatId, me);
+  if (chat.type === "saved") return { typingUsers: [] };
+  const blocked = await blockedIdsOf(me.id);
+  return { typingUsers: getActiveTypers(chatId, me.id, blocked) };
 }
 
 export async function openDirect(me, input) {

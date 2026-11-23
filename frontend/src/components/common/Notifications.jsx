@@ -6,6 +6,7 @@ import { Icon } from "./Icon";
 import { playSound } from "../../utils/sounds";
 
 const KIND_ICON = {
+  message: "chat",
   "friend-request": "user",
   "friend-accept": "users",
   blocked: "ban",
@@ -19,8 +20,8 @@ const KIND_ICON = {
   system: "info",
 };
 
-/** Bell + drop-down panel. Polls every 15s, plays a sound and shows a toast for new items. */
-export default function Notifications({ onOpenProfile }) {
+/** Bell + drop-down panel. Polls every 10s, plays a sound and shows a toast for new non-message items. */
+export default function Notifications({ onOpenProfile, onOpenConversation }) {
   const [items, setItems] = useState([]);
   const [unread, setUnread] = useState(0);
   const [open, setOpen] = useState(false);
@@ -40,23 +41,30 @@ export default function Notifications({ onOpenProfile }) {
       setItems(data.items);
       setUnread(data.unread);
       if (!firstLoad.current && fresh.length) {
-        playSound("message");
-        const latest = fresh[0];
-        toast(latest.title + (fresh.length > 1 ? ` (+${faNum(fresh.length - 1)})` : ""), "info");
+        // Incoming chat messages have a dedicated fast rich toast in Chat.jsx; avoid duplicate bell toast if on Chat screen
+        const nonMessageFresh = fresh.filter((n) => n.kind !== "message" || !onOpenConversation);
+        if (nonMessageFresh.length) {
+          playSound("message");
+          const latest = nonMessageFresh[0];
+          toast(
+            latest.title + (nonMessageFresh.length > 1 ? ` (+${faNum(nonMessageFresh.length - 1)})` : ""),
+            "info",
+          );
+        }
       }
       firstLoad.current = false;
     } catch {
       /* session problems are handled globally */
     }
-  }, []);
+  }, [onOpenConversation]);
 
   useEffect(() => {
     void load();
-    const t = setInterval(() => void load(), 15000);
+    const t = setInterval(() => void load(), 10000);
     return () => clearInterval(t);
   }, [load]);
 
-  // Place the panel next to the bell, fully inside the window (it used to overflow to one side).
+  // Place the panel next to the bell, clear of the nav rail and fully inside the viewport.
   useLayoutEffect(() => {
     if (!open) {
       setPos(null);
@@ -68,8 +76,18 @@ export default function Notifications({ onOpenProfile }) {
       if (!bell) return;
       const width = panel?.width ?? 352;
       const height = panel?.height ?? 420;
-      const gap = 8;
-      // Prefer opening toward the page content (to the left of the bell in RTL), then clamp.
+      const gap = 10;
+      const desktopRail = window.innerWidth >= 768 && bell.right > window.innerWidth - 96;
+      if (desktopRail) {
+        // Open cleanly to the left of the RTL nav rail, aligned near the bottom of the bell
+        const wantedLeft = bell.left - width - gap;
+        const left = Math.min(Math.max(gap, wantedLeft), window.innerWidth - width - gap);
+        const wantedTop = bell.bottom - height;
+        const top = Math.min(Math.max(gap, wantedTop), window.innerHeight - height - gap);
+        setPos({ top, left });
+        return;
+      }
+      // Mobile / top-header bell: open below the bell, clamped inside the viewport
       const wanted = bell.left - width + bell.width;
       const left = Math.min(Math.max(gap, wanted), window.innerWidth - width - gap);
       const top = Math.min(bell.bottom + gap, window.innerHeight - height - gap);
@@ -130,6 +148,14 @@ export default function Notifications({ onOpenProfile }) {
       .then((r) => setUnread(r.unread))
       .catch(() => {});
     setOpen(false);
+    if (n.kind === "message" && n.conversationId) {
+      if (onOpenConversation) {
+        onOpenConversation(n.conversationId);
+      } else {
+        navigate(`/?chat=${encodeURIComponent(n.conversationId)}`);
+      }
+      return;
+    }
     if (n.kind === "friend-request") navigate("/");
     else if (n.path) navigate(n.path);
   }
@@ -137,11 +163,11 @@ export default function Notifications({ onOpenProfile }) {
   return (
     <div className="relative" ref={rootRef}>
       <button
+        type="button"
         onClick={() => setOpen((v) => !v)}
         aria-label="اعلان‌ها"
         aria-expanded={open}
-        title="اعلان‌ها"
-        className={`press relative flex h-10 w-10 items-center justify-center rounded-xl transition ${
+        className={`group press relative flex h-10 w-10 items-center justify-center rounded-xl transition ${
           open ? "bg-accent/20 text-accent" : "text-muted hover:bg-surface-2 hover:text-fg"
         }`}
       >
@@ -151,36 +177,44 @@ export default function Notifications({ onOpenProfile }) {
             {faNum(unread > 99 ? 99 : unread)}
           </span>
         )}
+        <span
+          className={`pointer-events-none absolute right-[calc(100%+10px)] top-1/2 z-[140] hidden -translate-y-1/2 whitespace-nowrap rounded-lg border border-line px-2.5 py-1 text-[11px] font-bold text-fg shadow-xl transition popover-blur md:block ${
+            open ? "opacity-0" : "opacity-0 group-hover:opacity-100"
+          }`}
+        >
+          اعلان‌ها
+        </span>
       </button>
 
       {open && typeof document !== "undefined" && createPortal(
         <div
           ref={panelRef}
-          className="anim-rise fixed z-[80] flex max-h-[min(70vh,32rem)] w-[min(92vw,22rem)] flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-2xl"
+          dir="rtl"
+          className="popover-blur anim-rise fixed z-[130] flex max-h-[min(70vh,32rem)] w-[min(92vw,22rem)] flex-col overflow-hidden rounded-2xl border border-line text-fg shadow-2xl"
           style={pos ? { top: pos.top, left: pos.left, visibility: "visible" } : { top: -9999, left: -9999, visibility: "hidden" }}
         >
-          <div className="flex shrink-0 items-center gap-2 border-b border-line px-4 py-3">
-            <h3 className="flex-1 text-sm font-black">اعلان‌ها</h3>
+          <div className="flex shrink-0 items-center gap-1.5 border-b border-line/80 bg-surface-2/40 px-4 py-3">
+            <h3 className="flex-1 text-sm font-black text-fg">اعلان‌ها</h3>
             {onOpenProfile && (
-              <button onClick={() => { setOpen(false); onOpenProfile(); }} className="rounded-md px-2 py-1 text-[11px] text-muted hover:text-accent">
+              <button onClick={() => { setOpen(false); onOpenProfile(); }} className="rounded-lg px-2 py-1 text-[11px] font-bold text-muted transition hover:bg-surface-2 hover:text-accent">
                 پروفایل
               </button>
             )}
-            <button onClick={() => void markAll()} disabled={busy || !unread} className="rounded-md px-2 py-1 text-[11px] text-accent disabled:opacity-40">
+            <button onClick={() => void markAll()} disabled={busy || !unread} className="rounded-lg px-2 py-1 text-[11px] font-bold text-accent transition hover:bg-accent/15 disabled:cursor-not-allowed disabled:text-muted/55">
               خواندن همه
             </button>
-            <button onClick={() => void clearAll()} disabled={busy || !items.length} className="rounded-md px-2 py-1 text-[11px] text-rose-400 disabled:opacity-40">
+            <button onClick={() => void clearAll()} disabled={busy || !items.length} className="rounded-lg px-2 py-1 text-[11px] font-bold text-rose-400 transition hover:bg-rose-500/15 disabled:cursor-not-allowed disabled:text-muted/55">
               پاک کردن
             </button>
           </div>
-          <div className="scroll-thin min-h-0 flex-1 overflow-y-auto p-2">
+          <div className="scroll-thin min-h-0 flex-1 overflow-y-auto p-2.5">
             {items.length === 0 ? (
-              <div className="flex flex-col items-center gap-2 px-4 py-10 text-center">
-                <span className="flex h-11 w-11 items-center justify-center rounded-lg bg-surface-2 text-muted">
-                  <Icon name="bell" size={20} />
+              <div className="flex flex-col items-center gap-2.5 px-4 py-10 text-center">
+                <span className="flex h-12 w-12 items-center justify-center rounded-xl border border-accent/25 bg-accent/12 text-accent">
+                  <Icon name="bell" size={21} />
                 </span>
-                <p className="text-sm font-bold">اعلانی ندارید</p>
-                <p className="text-[11px] text-muted">درخواست دوستی، دعوت به جلسه و اقدامات مدیر اینجا نشان داده می‌شود.</p>
+                <p className="text-sm font-black text-fg">اعلانی ندارید</p>
+                <p className="max-w-[240px] text-xs leading-6 text-muted">درخواست دوستی، دعوت به جلسه و پیام‌های تازه در این بخش نمایش داده می‌شود.</p>
               </div>
             ) : (
               items.map((n) => (

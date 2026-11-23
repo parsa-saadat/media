@@ -6,10 +6,11 @@ import {
   insertMessage,
   updateOneMessage,
 } from "../../model/controller/messages/messages.controller.js";
+import { insertNotification } from "../../model/controller/notifications/notifications.controller.js";
 import { findFiles, findOneFile } from "../../model/controller/storage/storage.controller.js";
 import { findUsersByIds } from "../../model/controller/users/users.controller.js";
 import { HttpError } from "../../utils/http/http.util.js";
-import { getOrCreateSaved, requireMember } from "../chats/chats.service.js";
+import { getOrCreateSaved, requireMember, setTypingState } from "../chats/chats.service.js";
 import { removeUnusedFiles } from "../storage/storage.service.js";
 
 const PAGE_SIZE = 50;
@@ -50,6 +51,7 @@ async function present(messages) {
       fileIds: rawIds,
       files: filesMeta,
       forwardedFrom: message.forwardedFrom ?? null,
+      forwardedFromUserId: typeof message.forwardedFromUserId === "number" ? message.forwardedFromUserId : null,
       editedAt: message.editedAt ?? null,
       readBy: (message.readBy ?? []).map((r) => ({ userId: r.userId, at: r.at })),
       fileName: firstFile?.name ?? null,
@@ -81,7 +83,7 @@ export async function listMessages(me, chatId, range) {
 
 export async function sendMessage(me, chatId, input) {
   if (!me.permissions.includes("messages.send")) throw new HttpError(403, "شما اجازه ارسال پیام ندارید");
-  await requireMember(chatId, me);
+  const { chat } = await requireMember(chatId, me);
 
   const ids = Array.isArray(input.fileIds) && input.fileIds.length
     ? input.fileIds
@@ -116,16 +118,134 @@ export async function sendMessage(me, chatId, input) {
     ...(ids.length > 0 ? { fileIds: ids } : {}),
   });
   await touchChat(chatId);
-  return {
-    id: message._id,
-    conversationId: chatId,
-    senderId: me.id,
-    type,
-    content: message.content,
-    fileId: message.fileId,
-    fileIds: ids,
-    createdAt: message.createdAt,
-  };
+  setTypingState(chatId, me, false);
+
+  // Dispatch rich message notifications to all other chat members (who have not blocked sender)
+  if (chat.type !== "saved") {
+    const recipientIds = chat.members.map((m) => m.userId).filter((uid) => uid !== me.id);
+    if (recipientIds.length > 0) {
+      const blocks = await findBlocks({ blockerId: { $in: recipientIds }, blockedId: me.id });
+      const blockers = new Set(blocks.map((b) => b.blockerId));
+      const previewBody =
+        type === "voice"
+          ? "🎙 پیام صوتی"
+          : type === "image"
+            ? `🖼 تصویر${input.content ? ` · ${input.content.slice(0, 60)}` : ""}`
+            : type === "file"
+              ? `📎 فایل${input.content ? ` · ${input.content.slice(0, 60)}` : ""}`
+              : (input.content || "").slice(0, 90);
+      const notifTitle =
+        chat.type === "direct"
+          ? `پیام جدید از ${me.displayName}`
+          : `${me.displayName} در «${chat.name}»`;
+      await Promise.all(
+        recipientIds
+          .filter((uid) => !blockers.has(uid))
+          .map((uid) =>
+            insertNotification({
+              userId: uid,
+              kind: "message",
+              title: notifTitle,
+              body: previewBody,
+              path: `/?chat=${chatId}`,
+              actorName: me.displayName,
+              conversationId: chatId,
+              senderId: me.id,
+            }).catch(() => {}),
+          ),
+      );
+    }
+  }
+
+    return (await present([message]))[0];
+}
+
+/** Forwards one or several messages into one or several target conversations (preserving original sender attribution). */
+export async function forwardMessages(me, input) {
+  if (!me.permissions.includes("messages.send")) throw new HttpError(403, "شما اجازه ارسال پیام ندارید");
+  const { messageIds, targetConversationIds } = input;
+
+  // Verify membership in all destination conversations
+  for (const targetId of targetConversationIds) {
+    await requireMember(targetId, me);
+  }
+
+  // Load and verify source messages (preserve chronological order)
+  const rawFound = await findMessages({ _id: { $in: messageIds } });
+  const byId = new Map(rawFound.map((m) => [m._id, m]));
+  const ordered = messageIds
+    .map((id) => byId.get(id))
+    .filter((m) => m && m.type !== "deleted" && m.type !== "system");
+  if (!ordered.length) throw new HttpError(404, "پیام قابل فوروارد پیدا نشد");
+
+  const srcConvIds = [...new Set(ordered.map((m) => m.conversationId))];
+  for (const cid of srcConvIds) {
+    await requireMember(cid, me);
+  }
+
+  const senderIds = [...new Set(ordered.map((m) => m.senderId).filter((id) => typeof id === "number"))];
+  const senders = new Map((senderIds.length ? await findUsersByIds(senderIds) : []).map((u) => [u._id, u]));
+
+  let count = 0;
+  for (const targetId of targetConversationIds) {
+    const targetChat = await findOneChat({ _id: targetId });
+    for (const orig of ordered) {
+      const ids = Array.isArray(orig.fileIds) && orig.fileIds.length
+        ? orig.fileIds
+        : orig.fileId
+          ? [orig.fileId]
+          : [];
+      const fromName = orig.forwardedFrom || (orig.senderId ? senders.get(orig.senderId)?.displayName ?? null : null);
+      const fromUserId =
+        typeof orig.forwardedFromUserId === "number"
+          ? orig.forwardedFromUserId
+          : typeof orig.senderId === "number"
+            ? orig.senderId
+            : null;
+      await insertMessage({
+        conversationId: targetId,
+        senderId: me.id,
+        type: orig.type,
+        content: orig.content,
+        fileId: ids[0] || null,
+        ...(ids.length > 0 ? { fileIds: ids } : {}),
+        forwardedFrom: fromName,
+        ...(fromUserId ? { forwardedFromUserId: fromUserId } : {}),
+      });
+      count++;
+    }
+    await touchChat(targetId);
+
+    if (targetChat && targetChat.type !== "saved") {
+      const recipientIds = targetChat.members.map((m) => m.userId).filter((uid) => uid !== me.id);
+      if (recipientIds.length > 0) {
+        const blocks = await findBlocks({ blockerId: { $in: recipientIds }, blockedId: me.id });
+        const blockers = new Set(blocks.map((b) => b.blockerId));
+        const notifTitle =
+          targetChat.type === "direct"
+            ? `پیام فورواردشده از ${me.displayName}`
+            : `${me.displayName} در «${targetChat.name}»`;
+        await Promise.all(
+          recipientIds
+            .filter((uid) => !blockers.has(uid))
+            .map((uid) =>
+              insertNotification({
+                userId: uid,
+                kind: "message",
+                title: notifTitle,
+                body: ordered.length > 1 ? `${ordered.length} پیام فوروارد شد` : (ordered[0]?.content || "پیام فورواردشده").slice(0, 80),
+                path: `/?chat=${targetId}`,
+                actorName: me.displayName,
+                conversationId: targetId,
+                senderId: me.id,
+              }).catch(() => {}),
+            ),
+        );
+      }
+    }
+  }
+
+  return { forwarded: count, targets: targetConversationIds.length };
 }
 
 /** Saves (bookmarks/forwards) an existing message from any chat the user belongs to into their Saved Messages. */
@@ -150,7 +270,12 @@ export async function saveMessageToVault(me, messageId) {
     content: original.content,
     fileId: ids[0] || null,
     ...(ids.length > 0 ? { fileIds: ids } : {}),
-    forwardedFrom: sender ? sender.displayName : null,
+    forwardedFrom: original.forwardedFrom || (sender ? sender.displayName : null),
+    ...(typeof original.forwardedFromUserId === "number"
+      ? { forwardedFromUserId: original.forwardedFromUserId }
+      : sender
+        ? { forwardedFromUserId: sender._id }
+        : {}),
   });
   await touchChat(savedChat._id);
   return { id: copy._id, savedConversationId: savedChat._id };

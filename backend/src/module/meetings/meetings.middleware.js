@@ -26,7 +26,8 @@ export const validateCreateMeeting = (req) => {
   if (rawTitle.length > 60) throw new HttpError(400, "عنوان جلسه حداکثر ۶۰ کاراکتر می‌تواند باشد");
   req.input = {
     title: rawTitle ? (escapeRegex(rawTitle).length > 200 ? rawTitle.slice(0, 60) : rawTitle) : "",
-    lobby: req.body.lobby !== false,
+    // Default to direct entry (lobby: false) unless host explicitly enables lobby!
+    lobby: req.body.lobby === true,
     allowNames: true,
   };
 };
@@ -56,6 +57,8 @@ export const validateMeetingAction = (req) => {
     const target = text(req.body.target, 100);
     if (!target) throw new HttpError(400, "شرکت‌کنندهٔ هدف مشخص نیست");
     input = { action, joinToken, target };
+  } else if (action === "set-lobby") {
+    input = { action: "set-lobby", joinToken, lobby: req.body.lobby === true };
   } else if (action === "mic") {
     input = { action: "mic", joinToken, on: req.body.on === true };
   } else if (action === "share") {
@@ -76,6 +79,10 @@ export const validateMeetingAction = (req) => {
       quality: defaultQuality(quality),
       fps: defaultFps(Math.trunc(Number(req.body.fps)) || 30),
     };
+  } else if (action === "conn-state") {
+    const raw = text(req.body.state, 16);
+    const state = ["connecting", "connected", "relay", "reconnecting"].includes(raw) ? raw : "connecting";
+    input = { action: "conn-state", joinToken, state };
   } else if (action === "game-create") {
     input = { action, joinToken, game: text(req.body.game, 16) };
   } else if (["game-join", "game-spectate", "game-start", "game-rematch", "game-close"].includes(action)) {

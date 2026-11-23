@@ -13,12 +13,6 @@ const VERSE = {
   ref: "سوره بقره، آیه ۸۳",
 };
 
-const HADITH = {
-  ar: "خَيْرُ النَّاسِ أَنْفَعُهُمْ لِلنَّاسِ",
-  fa: "بهترین مردم کسی است که بیشترین سود را به مردم برساند",
-  by: "پیامبر اکرم (ص)",
-};
-
 const STORAGE_KEY = "voxsy-welcome-seen";
 
 export default function WelcomePopup() {
@@ -32,21 +26,21 @@ export default function WelcomePopup() {
       sessionStorage.setItem(STORAGE_KEY, "1");
     } catch {}
     setMounted(true);
-    const auto = setTimeout(() => dismiss(), 11000);
+    const auto = setTimeout(() => dismiss(), 9000);
     return () => clearTimeout(auto);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function dismiss() {
     setClosing(true);
-    setTimeout(() => setMounted(false), 420);
+    setTimeout(() => setMounted(false), 380);
   }
 
   if (!mounted) return null;
 
   return (
     <div
-      className={`fixed inset-0 z-[70] flex items-center justify-center p-4 transition-opacity duration-400 ${
+      className={`fixed inset-0 z-[70] flex items-center justify-center p-4 transition-opacity duration-300 ${
         closing ? "opacity-0" : "opacity-100"
       }`}
       role="dialog"
@@ -55,59 +49,45 @@ export default function WelcomePopup() {
     >
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={dismiss} />
       <div
-        className={`relative w-full max-w-lg overflow-hidden rounded-xl border border-line bg-surface shadow-2xl transition-all duration-400 ${
+        className={`relative w-full max-w-md overflow-hidden rounded-2xl border border-line bg-surface/92 shadow-2xl backdrop-blur-2xl transition-all duration-300 ${
           closing ? "translate-y-4 scale-95 opacity-0" : "anim-pop translate-y-0 scale-100 opacity-100"
         }`}
       >
-        <div className="grad-accent h-1.5 w-full" />
-        <div className="absolute -left-16 -top-16 h-48 w-48 rounded-full bg-accent/25 blur-3xl" />
-        <div className="absolute -bottom-20 -right-10 h-48 w-48 rounded-full bg-accent-2/20 blur-3xl" />
+        <div className="shimmer-line h-1 w-full" />
+        <div className="pointer-events-none absolute -left-16 -top-16 h-44 w-44 rounded-full bg-accent/20 blur-3xl" />
+        <div className="pointer-events-none absolute -bottom-20 -right-10 h-44 w-44 rounded-full bg-accent-2/15 blur-3xl" />
 
         <button
           onClick={dismiss}
           aria-label="بستن"
-          className="absolute left-4 top-5 z-10 flex h-9 w-9 items-center justify-center rounded-lg text-muted transition hover:bg-surface-2 hover:text-fg"
+          className="absolute left-4 top-4 z-10 flex h-8 w-8 items-center justify-center rounded-xl border border-line/70 bg-surface-2/80 text-muted transition hover:bg-surface-3 hover:text-fg"
         >
-          <Icon name="close" size={18} />
+          <Icon name="close" size={16} />
         </button>
 
-        <div className="relative px-6 pb-6 pt-8 text-center sm:px-8">
-          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-xl border border-accent/30 bg-accent/15 text-accent glow">
-            <Icon name="sparkles" size={28} />
+        <div className="relative px-6 pb-6 pt-7 text-center sm:px-7">
+          <div className="mx-auto mb-3.5 flex h-13 w-13 items-center justify-center rounded-2xl border border-accent/35 bg-accent/15 text-accent">
+            <Icon name="sparkles" size={26} />
           </div>
-          <h2 className="text-2xl font-black">{greeting.title}</h2>
-          <p className="mt-1 text-sm text-muted">به inebuly خوش آمدید · {greeting.sub}</p>
+          <h2 className="text-xl font-black text-fg">{greeting.title}</h2>
+          <p className="mt-1 text-xs text-muted">به inebuly خوش آمدید · {greeting.sub}</p>
 
-          <div className="mt-5 rounded-xl border border-accent/25 bg-accent/5 px-5 py-4">
-            <p className="mb-1 flex items-center justify-center gap-1.5 text-[11px] font-bold text-accent">
-              <Icon name="book" size={14} /> قرآن کریم
+          <div className="mt-5 rounded-2xl border border-accent/30 bg-accent/10 px-5 py-4 backdrop-blur-md">
+            <p className="mb-1.5 flex items-center justify-center gap-1.5 text-[11px] font-bold text-accent">
+              <Icon name="book" size={14} /> آیهٔ قرآن کریم
             </p>
-            <p className="quran-text text-[22px] leading-9">{VERSE.ar}</p>
-            <p className="mt-1 text-xs text-muted">{VERSE.fa}</p>
-            <p className="mt-1 text-[10px] font-bold text-accent">{VERSE.ref}</p>
+            <p className="quran-text text-[22px] leading-10 text-fg">{VERSE.ar}</p>
+            <p className="mt-1.5 text-xs font-semibold text-fg/85">{VERSE.fa}</p>
+            <p className="mt-1.5 text-[10px] font-bold text-accent">{VERSE.ref}</p>
           </div>
-
-          <div className="mt-3 rounded-xl border border-accent-2/25 bg-accent-2/5 px-5 py-4">
-            <p className="mb-1 flex items-center justify-center gap-1.5 text-[11px] font-bold text-accent-2">
-              <Icon name="quote" size={14} /> حدیث
-            </p>
-            <p className="naskh-text text-[19px] font-bold leading-8">{HADITH.ar}</p>
-            <p className="mt-1 text-xs text-muted">{HADITH.fa}</p>
-            <p className="mt-1 text-[10px] font-bold text-accent-2">{HADITH.by}</p>
-          </div>
-
-          <p className="mt-4 text-xs leading-6 text-muted">
-            پیش از فرستادن هر پیام، یک لحظه فکر کنیم؛ گفتگو با مهربانی، بهترین شروع است. برای گفتگوی زنده، یک «جلسه» بساز و لینک آن را بفرست.
-          </p>
 
           <button
             onClick={dismiss}
-            className="grad-accent glow mt-5 inline-flex w-full items-center justify-center gap-2 rounded-lg py-3 text-sm font-bold text-on-accent"
+            className="press mt-5 inline-flex w-full items-center justify-center gap-2 rounded-xl border border-accent/45 bg-accent/20 py-2.5 text-sm font-black text-accent backdrop-blur-md transition hover:bg-accent/30"
           >
-            <Icon name="chat" size={18} />
+            <Icon name="chat" size={17} />
             شروع گفتگو
           </button>
-          <p className="mt-3 text-[10px] text-muted/70">این پیام خودکار بسته می‌شود</p>
         </div>
       </div>
     </div>

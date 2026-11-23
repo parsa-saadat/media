@@ -3,16 +3,27 @@ import { nextId } from "../../../utils/generators/id.generator.js";
 
 const users = () => getCollection("users");
 
-const IDLE_AFTER_MS = 5 * 60_000;
-
 /**
- * Effective presence. "invisible" always reads as offline; otherwise a stale lastSeen means idle.
- * Never exposes phone, password hash or the raw status choice.
+ * A user whose client hasn't made any authenticated request in over 75s (heartbeats/polls run every 3–15s)
+ * is considered disconnected (`offline`) automatically!
+ * When actively connected (`!disconnected`):
+ * - `"invisible"` always reads as `"offline"` publicly.
+ * - `"idle"` and `"dnd"` are explicit manual choices set by the user and stay active while connected.
+ * - `"online"` (default) shows `"online"` while connected.
  */
-export const toPublicUser = (user) => {
+export const OFFLINE_AFTER_MS = 75_000;
+
+export const effectivePresence = (user) => {
   const chosen = user.status ?? "online";
-  const stale = Date.now() - user.lastSeenAt.getTime() > IDLE_AFTER_MS;
-  const status = chosen === "invisible" ? "offline" : chosen === "online" && stale ? "idle" : chosen;
+  if (chosen === "invisible") return "offline";
+  const lastMs = user.lastSeenAt instanceof Date ? user.lastSeenAt.getTime() : new Date(user.lastSeenAt || 0).getTime();
+  if (!lastMs || Date.now() - lastMs > OFFLINE_AFTER_MS) return "offline";
+  if (chosen === "idle" || chosen === "dnd") return chosen;
+  return "online";
+};
+
+export const toPublicUser = (user) => {
+  const status = effectivePresence(user);
   return {
     id: user._id,
     username: user.username,

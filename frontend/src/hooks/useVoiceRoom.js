@@ -2,22 +2,51 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch, getToken, toast } from "../utils/client";
 import { createSpeakingDetector, emitMicLevel } from "../utils/micMeter";
 import { createRelayAudioPlayer, createRelayAudioSender } from "../utils/liveAudioRelay";
-import { RTC_CONFIG, watchIce } from "../config/rtc";
+import {
+  buildMicConstraints,
+  createMicAudioPipeline,
+  DEFAULT_AUDIO_PREFS,
+  readAudioPrefs,
+  saveAudioPrefs,
+  subscribeAudioPrefs,
+} from "../utils/audioPrefs";
 
-const DEFAULT_PREFS = { inputId: "", outputId: "", master: 100, micGain: 100, volumes: {} };
+const DEFAULT_PREFS = DEFAULT_AUDIO_PREFS;
 
-/** Capture constraints per shared-screen quality. */
+/** Capture constraints + target encoder bitrate per shared-screen quality. */
 const QUALITY = {
-  "360p": { width: 640, height: 360, frameRate: 15 },
-  "720p": { width: 1280, height: 720, frameRate: 24 },
-  "1080p": { width: 1920, height: 1080, frameRate: 30 },
+  "360p": { width: 640, height: 360, frameRate: 20, bitrate: 750_000 },
+  "480p": { width: 854, height: 480, frameRate: 24, bitrate: 1_150_000 },
+  "720p": { width: 1280, height: 720, frameRate: 30, bitrate: 2_800_000 },
+  "1080p": { width: 1920, height: 1080, frameRate: 30, bitrate: 6_000_000 },
 };
 
-function readPrefs() {
+async function applyVoiceScreenEncoding(sender, track, quality) {
+  if (!sender || !track || typeof sender.getParameters !== "function") return;
+  const spec = QUALITY[quality] ?? QUALITY["720p"];
   try {
-    const raw = JSON.parse(localStorage.getItem("voxsy-voice-settings") || "{}");
-    return { ...DEFAULT_PREFS, ...raw, volumes: raw.volumes || {} };
-  } catch { return DEFAULT_PREFS; }
+    if ("contentHint" in track) track.contentHint = "detail";
+  } catch {}
+  try {
+    const settings = track.getSettings?.() || {};
+    const srcHeight = Number(settings.height) || spec.height;
+    const scaleDown = srcHeight > spec.height ? Math.max(1, Number((srcHeight / spec.height).toFixed(2))) : 1;
+    const params = sender.getParameters() || {};
+    if (!Array.isArray(params.encodings) || params.encodings.length === 0) params.encodings = [{}];
+    params.degradationPreference = "maintain-resolution";
+    for (const enc of params.encodings) {
+      enc.maxBitrate = spec.bitrate;
+      enc.maxFramerate = spec.frameRate;
+      enc.scaleResolutionDownBy = scaleDown;
+      enc.priority = "high";
+      enc.networkPriority = "high";
+    }
+    await sender.setParameters(params);
+  } catch {}
+}
+
+function readPrefs() {
+  return readAudioPrefs();
 }
 
 export function useVoiceRoom(conversationId, me) {
@@ -38,11 +67,14 @@ export function useVoiceRoom(conversationId, me) {
   const [serverTimeDelta, setServerTimeDelta] = useState(0);
   const [connectionCount, setConnectionCount] = useState(0);
   const [conflictOtherDevice, setConflictOtherDevice] = useState(false);
+  const [myConnState, setMyConnState] = useState("connecting");
 
   const prefsRef = useRef(prefs);
   const prefsReadyRef = useRef(false);
   const restrictionsRef = useRef(restrictions);
   const joinedRef = useRef("");
+  const joinedAtTsRef = useRef(0);
+  const lastReportedConnRef = useRef("");
   const cursorRef = useRef(0);
   const audioCursorRef = useRef(0);
   const relayPlayerRef = useRef(null);
@@ -52,21 +84,22 @@ export function useVoiceRoom(conversationId, me) {
   const streamRef = useRef(null);
   const trackRef = useRef(null);
   const contextRef = useRef(null);
-  const gainRef = useRef(null);
+  const micPipelineRef = useRef(null);
+  const hookInstanceId = useRef(`voice-${Math.random().toString(36).slice(2, 9)}`);
   const micOnRef = useRef(false);
   const busyPoll = useRef(false);
   const alive = useRef(true);
-  const levelFrame = useRef(0);
   const speakingDetector = useRef(createSpeakingDetector());
   const queuedIce = useRef(new Map());
   const screenStream = useRef(null);
   const screenTrack = useRef(null);
+  const shareQualityRef = useRef("720p");
   const sharingRef = useRef(false);
 
   useEffect(() => {
     prefsRef.current = prefs;
     if (!prefsReadyRef.current) return;
-    try { localStorage.setItem("voxsy-voice-settings", JSON.stringify(prefs)); } catch {}
+    micPipelineRef.current?.updatePrefs(prefs);
   }, [prefs]);
   useEffect(() => { restrictionsRef.current = restrictions; }, [restrictions]);
 
@@ -83,7 +116,16 @@ export function useVoiceRoom(conversationId, me) {
     setPrefs(saved);
     void refreshDevices();
     navigator.mediaDevices?.addEventListener?.("devicechange", refreshDevices);
-    return () => navigator.mediaDevices?.removeEventListener?.("devicechange", refreshDevices);
+    const unsub = subscribeAudioPrefs((next, src) => {
+      if (src === hookInstanceId.current) return;
+      prefsRef.current = next;
+      setPrefs(next);
+      micPipelineRef.current?.updatePrefs(next);
+    });
+    return () => {
+      navigator.mediaDevices?.removeEventListener?.("devicechange", refreshDevices);
+      unsub();
+    };
   }, [refreshDevices]);
 
   const send = useCallback((body) =>
@@ -188,6 +230,9 @@ export function useVoiceRoom(conversationId, me) {
           peer.screenTransceiver.direction = wantDir;
           changed = true;
         }
+        if (wantScreen) {
+          await applyVoiceScreenEncoding(peer.screenTransceiver.sender, wantScreen, shareQualityRef.current);
+        }
       }
     } catch (err) {
       console.warn("syncLocalMediaToPeer voice failed", err);
@@ -197,82 +242,110 @@ export function useVoiceRoom(conversationId, me) {
     }
   }, [negotiatePeer]);
 
+  /** Computes our live WebRTC / audio-relay connection state and syncs changes to the server so peers see it. */
+  const recomputeConnState = useCallback(() => {
+    const jt = joinedRef.current;
+    if (!jt) return;
+    const others = participantsRef.current.filter((p) => p.userId !== me.id);
+    let next = "connected";
+    if (others.length > 0) {
+      let connectedCount = 0;
+      let reconnectingCount = 0;
+      for (const p of others) {
+        const peer = peersRef.current.get(p.userId);
+        const cs = peer?.pc?.connectionState;
+        const ice = peer?.pc?.iceConnectionState;
+        if (cs === "connected" || ice === "connected" || ice === "completed") {
+          connectedCount++;
+        } else if (cs === "disconnected" || cs === "failed" || ice === "disconnected" || ice === "failed") {
+          reconnectingCount++;
+        }
+      }
+      if (connectedCount === others.length) {
+        next = "connected";
+      } else if (reconnectingCount > 0 && connectedCount === 0) {
+        next = Date.now() - joinedAtTsRef.current > 3500 ? "relay" : "reconnecting";
+      } else if (Date.now() - joinedAtTsRef.current > 3500) {
+        next = "relay";
+      } else {
+        next = "connecting";
+      }
+    }
+    setMyConnState(next);
+    if (lastReportedConnRef.current !== next) {
+      lastReportedConnRef.current = next;
+      setParticipants((list) => list.map((p) => (p.userId === me.id ? { ...p, connState: next } : p)));
+      void send({ action: "conn-state", joinToken: jt, state: next }).catch(() => {});
+    }
+  }, [me.id, send]);
+
   const stopMic = useCallback(() => {
-    if (levelFrame.current) cancelAnimationFrame(levelFrame.current);
-    levelFrame.current = 0;
     if (speakingDetector.current.reset()) setSpeaking(false);
     emitMicLevel(0);
+    micPipelineRef.current?.close();
+    micPipelineRef.current = null;
+    contextRef.current = null;
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     trackRef.current?.stop();
     trackRef.current = null;
-    if (contextRef.current) void contextRef.current.close().catch(() => {});
-    contextRef.current = null;
-    gainRef.current = null;
   }, []);
 
   const acquireMic = useCallback(async (deviceId) => {
     if (!navigator.mediaDevices?.getUserMedia) throw new Error("این مرورگر یا صفحه اجازهٔ دسترسی به میکروفون ندارد. صفحه را روی HTTPS باز کنید.");
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: {
-      ...(deviceId ? { deviceId: { ideal: deviceId } } : {}),
-      echoCancellation: true, noiseSuppression: true, autoGainControl: true,
-    } });
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: buildMicConstraints(prefsRef.current, deviceId),
+    });
     if (!alive.current) { stream.getTracks().forEach((t) => t.stop()); return; }
     const oldStream = streamRef.current;
     const oldTrack = trackRef.current;
-    const oldContext = contextRef.current;
+    const oldPipeline = micPipelineRef.current;
     let outputTrack = stream.getAudioTracks()[0];
-    let context = null;
-    let gain = null;
+    const shouldEnable = micOnRef.current && !restrictionsRef.current.micMuted;
+    // Keep raw microphone track enabled so WebAudio graph receives real samples!
+    stream.getAudioTracks().forEach((t) => { t.enabled = true; });
     try {
-      context = new AudioContext();
-      if (context.state === "suspended") void context.resume().catch(() => {});
-      const source = context.createMediaStreamSource(stream);
-      gain = context.createGain();
-      gain.gain.value = prefsRef.current.micGain / 100;
-      const destination = context.createMediaStreamDestination();
-      source.connect(gain).connect(destination);
-      outputTrack = destination.stream.getAudioTracks()[0];
-      const analyser = context.createAnalyser();
-      analyser.fftSize = 256;
-      source.connect(analyser);
-      if (levelFrame.current) cancelAnimationFrame(levelFrame.current);
-      const data = new Uint8Array(analyser.frequencyBinCount);
-      let lastUpdate = 0;
-      const measure = (time) => {
-        if (time - lastUpdate > 60) {
-          analyser.getByteTimeDomainData(data);
-          let sum = 0;
-          for (const v of data) sum += (v - 128) ** 2;
-          const level = Math.min(100, Math.round(Math.sqrt(sum / data.length) * 5));
+      const pipe = createMicAudioPipeline(stream, prefsRef.current, {
+        onLevel: (rawLevel, gateOpen) => {
+          const active = !joinedRef.current || (micOnRef.current && !restrictionsRef.current.micMuted);
+          const level = active ? rawLevel : 0;
           emitMicLevel(level);
-          if (speakingDetector.current.push(level)) setSpeaking(speakingDetector.current.get());
-          lastUpdate = time;
-        }
-        levelFrame.current = requestAnimationFrame(measure);
-      };
-      levelFrame.current = requestAnimationFrame(measure);
-    } catch { if (context) void context.close().catch(() => {}); context = null; gain = null; }
-    outputTrack.enabled = micOnRef.current && !restrictionsRef.current.micMuted;
-    stream.getAudioTracks().forEach((t) => { t.enabled = outputTrack.enabled; });
+          const effectiveSpeakingLevel = prefsRef.current.vadEnabled && !gateOpen ? 0 : level;
+          if (speakingDetector.current.push(effectiveSpeakingLevel)) {
+            setSpeaking(speakingDetector.current.get());
+          }
+        },
+      });
+      micPipelineRef.current = pipe;
+      contextRef.current = pipe.context;
+      if (pipe.outputTrack) outputTrack = pipe.outputTrack;
+    } catch {
+      micPipelineRef.current = null;
+      contextRef.current = null;
+    }
+    outputTrack.enabled = shouldEnable;
+    if (!contextRef.current) {
+      stream.getAudioTracks().forEach((t) => { t.enabled = shouldEnable; });
+    }
     streamRef.current = stream;
     trackRef.current = outputTrack;
-    contextRef.current = context;
-    gainRef.current = gain;
     for (const [uid, peer] of peersRef.current.entries()) {
       await syncLocalMediaToPeer(peer, uid, true);
     }
+    oldPipeline?.close();
     oldStream?.getTracks().forEach((t) => t.stop());
     if (oldTrack && oldTrack !== oldStream?.getAudioTracks()[0]) oldTrack.stop();
-    if (oldContext) void oldContext.close().catch(() => {});
     await refreshDevices();
   }, [refreshDevices, syncLocalMediaToPeer]);
 
   const createPeer = useCallback((user, initiator) => {
     const existing = peersRef.current.get(user.userId);
     if (existing) return existing;
-    const pc = new RTCPeerConnection(RTC_CONFIG);
-    watchIce(pc, `voice:${user.userId}`);
+    const pc = new RTCPeerConnection({ iceServers: [
+      { urls: "stun:stun.l.google.com:19302" },
+      { urls: "stun:stun1.l.google.com:19302" },
+      { urls: "stun:stun.cloudflare.com:3478" },
+    ] });
     // Numerical comparison so user IDs like 2 vs 10 never suffer string lexicographical bugs!
     const polite = Number(me.id) > Number(user.userId);
     const peer = {
@@ -350,9 +423,13 @@ export function useVoiceRoom(conversationId, me) {
     };
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === "failed" || pc.connectionState === "closed") closePeer(user.userId);
+      recomputeConnState();
+    };
+    pc.oniceconnectionstatechange = () => {
+      recomputeConnState();
     };
     return peer;
-  }, [closePeer, effectiveVolume, me.id, negotiatePeer, send, setAudioOutput]);
+  }, [closePeer, effectiveVolume, me.id, negotiatePeer, recomputeConnState, send, setAudioOutput]);
 
   const flushIce = useCallback(async (peer) => {
     for (const ice of peer.pendingIce.splice(0)) {
@@ -374,8 +451,10 @@ export function useVoiceRoom(conversationId, me) {
         if (peer.ignoringOffer) return;
 
         if (offerCollision && peer.polite) {
-          await peer.pc.setLocalDescription({ type: "rollback" }).catch(() => {});
-          await peer.pc.setRemoteDescription(payload);
+          await Promise.all([
+            peer.pc.setLocalDescription({ type: "rollback" }).catch(() => {}),
+            peer.pc.setRemoteDescription(payload),
+          ]);
         } else {
           await peer.pc.setRemoteDescription(payload);
         }
@@ -486,6 +565,7 @@ export function useVoiceRoom(conversationId, me) {
           }
         }
       }
+      recomputeConnState();
     } catch (err) {
       if (err.message.includes("پایان یافته") || err.message.includes("عضو این گفتگو") || err.message.includes("مسدودسازی")) {
         joinedRef.current = "";
@@ -495,7 +575,7 @@ export function useVoiceRoom(conversationId, me) {
         toast(err.message, "error");
       }
     } finally { busyPoll.current = false; }
-  }, [closePeer, conversationId, createPeer, handleSignal, me.id, me.permissions, stopMic, syncLocalMediaToPeer]);
+  }, [closePeer, conversationId, createPeer, effectiveVolume, handleSignal, me.id, me.permissions, recomputeConnState, stopMic, syncLocalMediaToPeer]);
 
   /** Internal: release the capture without touching the server (used when leaving). */
   const stopShareInternal = () => {
@@ -509,19 +589,29 @@ export function useVoiceRoom(conversationId, me) {
     setRemoteVideos({});
   };
 
-  const stopShare = useCallback(async () => {
+  const stopShare = useCallback(() => {
     const wasSharing = sharingRef.current;
-    screenTrack.current?.stop();
-    screenTrack.current = null;
+    if (screenTrack.current) {
+      screenTrack.current.onended = null;
+      screenTrack.current.stop();
+      screenTrack.current = null;
+    }
     screenStream.current = null;
     setLocalScreen(null);
     sharingRef.current = false;
     setSharing(false);
-    for (const [uid, peer] of peersRef.current.entries()) {
-      await syncLocalMediaToPeer(peer, uid, true);
-    }
-    if (wasSharing && joinedRef.current) await send({ action: "share", joinToken: joinedRef.current, on: false }).catch(() => {});
-  }, [send, syncLocalMediaToPeer]);
+    setParticipants((list) =>
+      list.map((p) => (p.userId === me.id ? { ...p, sharingOn: false } : p)),
+    );
+    void (async () => {
+      for (const [uid, peer] of peersRef.current.entries()) {
+        await syncLocalMediaToPeer(peer, uid, true).catch(() => {});
+      }
+      if (wasSharing && joinedRef.current) {
+        await send({ action: "share", joinToken: joinedRef.current, on: false }).catch(() => {});
+      }
+    })();
+  }, [me.id, send, syncLocalMediaToPeer]);
 
   const startShare = useCallback(async (quality) => {
     if (!joinedRef.current) return toast("اول به تماس بپیوندید", "error");
@@ -532,23 +622,38 @@ export function useVoiceRoom(conversationId, me) {
     try {
       setShareError("");
       const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { width: { ideal: c.width }, height: { ideal: c.height }, frameRate: { ideal: c.frameRate } },
+        video: {
+          width: { ideal: c.width, max: c.width },
+          height: { ideal: c.height, max: c.height },
+          frameRate: { ideal: c.frameRate, max: c.frameRate },
+        },
         audio: false,
       });
       const track = stream.getVideoTracks()[0];
       if (!track) throw new Error("صفحه‌ای انتخاب نشد");
+      await track.applyConstraints?.({
+        width: { ideal: c.width, max: c.width },
+        height: { ideal: c.height, max: c.height },
+        frameRate: { ideal: c.frameRate, max: c.frameRate },
+      }).catch(() => {});
       if (screenTrack.current) screenTrack.current.stop();
       screenStream.current = stream;
       screenTrack.current = track;
+      shareQualityRef.current = quality;
       setLocalScreen(stream);
       sharingRef.current = true;
       setShareQuality(quality);
-      track.onended = () => void stopShare();
-      await send({ action: "share", joinToken: joinedRef.current, on: true, quality });
       setSharing(true);
-      for (const [uid, peer] of peersRef.current.entries()) {
-        await syncLocalMediaToPeer(peer, uid, true);
-      }
+      setParticipants((list) =>
+        list.map((p) => (p.userId === me.id ? { ...p, sharingOn: true, shareQuality: quality } : p)),
+      );
+      track.onended = () => stopShare();
+      void (async () => {
+        await send({ action: "share", joinToken: joinedRef.current, on: true, quality }).catch(() => {});
+        for (const [uid, peer] of peersRef.current.entries()) {
+          await syncLocalMediaToPeer(peer, uid, true).catch(() => {});
+        }
+      })();
     } catch (e) {
       const msg = e.message || "";
       setShareError(msg.includes("Permission") || msg.includes("NotAllowed") ? "اشتراک صفحه لغو شد" : msg);
@@ -592,8 +697,9 @@ export function useVoiceRoom(conversationId, me) {
       streamRef.current?.getTracks().forEach((t) => t.stop());
       trackRef.current?.stop();
       screenStream.current?.getTracks().forEach((t) => t.stop());
-      if (contextRef.current) void contextRef.current.close().catch(() => {});
-      if (levelFrame.current) cancelAnimationFrame(levelFrame.current);
+      micPipelineRef.current?.close();
+      micPipelineRef.current = null;
+      contextRef.current = null;
       for (const peer of peersRef.current.values()) {
         peer.pc.close();
         if (peer.audio) { peer.audio.pause(); peer.audio.srcObject = null; peer.audio.remove(); }
@@ -697,7 +803,6 @@ export function useVoiceRoom(conversationId, me) {
     try {
       await acquireMic(prefsRef.current.inputId);
       if (trackRef.current) trackRef.current.enabled = false;
-      streamRef.current?.getAudioTracks().forEach((t) => { t.enabled = false; });
       return true;
     } catch (err) {
       setMicError("دسترسی به میکروفون داده نشد. از تنظیمات مرورگر مجوز را فعال کنید؛ بدون آن فقط شنونده خواهید بود.");
@@ -729,6 +834,9 @@ export function useVoiceRoom(conversationId, me) {
     try {
       const data = await send({ action: "join", joinToken: savedJoinToken, forceTakeover });
       if (!alive.current) return;
+      joinedAtTsRef.current = Date.now();
+      lastReportedConnRef.current = "";
+      setMyConnState("connecting");
       joinedRef.current = data.joinToken;
       try { sessionStorage.setItem(`inebuly-voice-token:${conversationId}`, data.joinToken); } catch {}
       cursorRef.current = data.cursor;
@@ -773,54 +881,84 @@ export function useVoiceRoom(conversationId, me) {
   const toggleMic = useCallback(async () => {
     if (!joinedRef.current) return;
     if (restrictionsRef.current.micMuted || !me.permissions.includes("voice.speak")) return toast("مجوز میکروفون شما محدود شده است", "error");
+    const next = !micOnRef.current;
+
+    // Instant zero-delay mute!
+    if (!next) {
+      micOnRef.current = false;
+      if (trackRef.current) trackRef.current.enabled = false;
+      streamRef.current?.getAudioTracks().forEach((t) => { t.enabled = false; });
+      setMicOn(false);
+      setSpeaking(false);
+      setParticipants((list) =>
+        list.map((p) => (p.userId === me.id ? { ...p, micOn: false } : p)),
+      );
+      void send({ action: "mic", joinToken: joinedRef.current, on: false }).catch(() => {});
+      return;
+    }
+
     if (!trackRef.current) {
       try { await acquireMic(prefsRef.current.inputId); setMicError(""); }
       catch { setMicError("دسترسی به میکروفون داده نشد. تنظیمات مرورگر را بررسی کنید."); return; }
     }
-    if (contextRef.current?.state === "suspended") await contextRef.current.resume().catch(() => {});
-    const next = !micOnRef.current;
-    try {
-      await send({ action: "mic", joinToken: joinedRef.current, on: next });
-      micOnRef.current = next;
-      if (trackRef.current) trackRef.current.enabled = next;
-      streamRef.current?.getAudioTracks().forEach((t) => { t.enabled = next; });
-      for (const [uid, peer] of peersRef.current.entries()) {
-        await syncLocalMediaToPeer(peer, uid, true);
+    if (contextRef.current?.state === "suspended") void contextRef.current.resume().catch(() => {});
+    micOnRef.current = true;
+    if (trackRef.current) trackRef.current.enabled = true;
+    streamRef.current?.getAudioTracks().forEach((t) => { t.enabled = true; });
+    setMicOn(true);
+    setParticipants((list) =>
+      list.map((p) => (p.userId === me.id ? { ...p, micOn: true } : p)),
+    );
+    void (async () => {
+      try {
+        await send({ action: "mic", joinToken: joinedRef.current, on: true });
+        for (const [uid, peer] of peersRef.current.entries()) {
+          await syncLocalMediaToPeer(peer, uid, true);
+        }
+      } catch (err) {
+        micOnRef.current = false;
+        if (trackRef.current) trackRef.current.enabled = false;
+        setMicOn(false);
+        toast(err.message, "error");
       }
-      setMicOn(next);
-    } catch (err) { toast(err.message, "error"); }
-  }, [acquireMic, me.permissions, send, syncLocalMediaToPeer]);
+    })();
+  }, [acquireMic, me.id, me.permissions, send, syncLocalMediaToPeer]);
+
+  const updateAudioPrefs = useCallback((patchOrFn) => {
+    const next = saveAudioPrefs(patchOrFn, hookInstanceId.current);
+    prefsRef.current = next;
+    setPrefs(next);
+    micPipelineRef.current?.updatePrefs(next);
+    return next;
+  }, []);
 
   const changeInput = useCallback(async (id) => {
     const old = prefsRef.current.inputId;
-    setPrefs((p) => ({ ...p, inputId: id }));
-    prefsRef.current = { ...prefsRef.current, inputId: id };
+    updateAudioPrefs({ inputId: id });
     if (joinedRef.current && me.permissions.includes("voice.speak")) {
       try { await acquireMic(id); setMicError(""); toast("میکروفون تغییر کرد", "success"); }
-      catch { setPrefs((p) => ({ ...p, inputId: old })); prefsRef.current.inputId = old; toast("اتصال به این میکروفون ممکن نیست", "error"); }
+      catch { updateAudioPrefs({ inputId: old }); toast("اتصال به این میکروفون ممکن نیست", "error"); }
     }
-  }, [acquireMic, me.permissions]);
+  }, [acquireMic, me.permissions, updateAudioPrefs]);
 
   const changeOutput = useCallback(async (id) => {
     const test = document.createElement("audio");
     if (id && typeof test.setSinkId !== "function") return toast("مرورگر شما انتخاب خروجی صدا را پشتیبانی نمی‌کند", "error");
     if (id) try { await test.setSinkId(id); } catch { return toast("دسترسی به این خروجی صدا داده نشد", "error"); }
-    setPrefs((p) => ({ ...p, outputId: id }));
-    prefsRef.current = { ...prefsRef.current, outputId: id };
+    updateAudioPrefs({ outputId: id });
     for (const peer of peersRef.current.values()) if (peer.audio && typeof peer.audio.setSinkId === "function") {
       try { await peer.audio.setSinkId(id); } catch {}
     }
-  }, []);
+  }, [updateAudioPrefs]);
 
-  const setMaster = useCallback((n) => setPrefs((p) => ({ ...p, master: Math.min(100, Math.max(0, n)) })), []);
+  const setMaster = useCallback((n) => updateAudioPrefs({ master: Math.min(100, Math.max(0, n)) }), [updateAudioPrefs]);
   const setMicGain = useCallback((n) => {
     const level = Math.min(200, Math.max(0, n));
-    setPrefs((p) => ({ ...p, micGain: level }));
-    if (gainRef.current) gainRef.current.gain.value = level / 100;
-  }, []);
-  const setVolume = useCallback((userId, n) => setPrefs((p) => ({
+    updateAudioPrefs({ micGain: level });
+  }, [updateAudioPrefs]);
+  const setVolume = useCallback((userId, n) => updateAudioPrefs((p) => ({
     ...p, volumes: { ...p.volumes, [String(userId)]: Math.min(100, Math.max(0, n)) },
-  })), []);
+  })), [updateAudioPrefs]);
   const enableAudio = useCallback(() => {
     for (const peer of peersRef.current.values()) if (peer.audio) void peer.audio.play().catch(() => {});
     if (contextRef.current?.state === "suspended") void contextRef.current.resume().catch(() => {});
@@ -828,10 +966,11 @@ export function useVoiceRoom(conversationId, me) {
 
   return {
     status, join, leave, previewMic, stopPreview, participants, tracks, restrictions, micOn, micError,
+    myConnState,
     speaking, sharing, shareQuality, shareError, remoteVideos, localScreen, startShare, stopShare,
     devices, prefs, serverTimeDelta, connectionCount, joinToken: joinedRef.current,
     conflictOtherDevice, clearConflict: () => setConflictOtherDevice(false),
-    toggleMic, changeInput, changeOutput, setMaster, setMicGain, setVolume, enableAudio,
+    toggleMic, changeInput, changeOutput, setMaster, setMicGain, setVolume, updateAudioPrefs, enableAudio,
     refreshDevices,
   };
 }

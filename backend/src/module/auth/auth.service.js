@@ -75,6 +75,7 @@ export function ensureSystemRoles() {
 
 export async function toAuthUser(user) {
   const roles = user.roleIds.length ? await findRoles({ _id: { $in: user.roleIds } }) : [];
+  const singlePhoto = user.avatarFileId ? [user.avatarFileId] : (user.photos ?? []).slice(0, 1);
   return {
     id: user._id,
     phone: user.phone,
@@ -82,9 +83,9 @@ export async function toAuthUser(user) {
     displayName: user.displayName,
     bio: user.bio,
     avatarColor: user.avatarColor,
-    avatarFileId: user.avatarFileId ?? null,
+    avatarFileId: singlePhoto[0] ?? null,
     bannerFileId: user.bannerFileId ?? null,
-    photos: user.photos ?? [],
+    photos: singlePhoto,
     status: user.status ?? "online",
     statusText: user.statusText ?? "",
     statusEmoji: user.statusEmoji ?? "",
@@ -110,7 +111,11 @@ export async function resolveSession(tokens) {
     const doc = await findOneUser({ _id: session.userId });
     if (!doc) continue;
     if (doc.isBanned) return { user: null, reason: "banned" };
-    if (Date.now() - doc.lastSeenAt.getTime() > 30_000) await updateOneUser({ _id: doc._id }, { lastSeenAt: new Date() });
+    const now = new Date();
+    if (now.getTime() - doc.lastSeenAt.getTime() > 15_000) {
+      await updateOneUser({ _id: doc._id }, { lastSeenAt: now });
+      doc.lastSeenAt = now;
+    }
     return { user: await toAuthUser(doc), reason: "ok" };
   }
   return { user: null, reason: "unknown-session" };

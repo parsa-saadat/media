@@ -5,6 +5,7 @@ import Admin from "./pages/Admin";
 import Chat from "./pages/Chat";
 import Meet from "./pages/Meet";
 import Istikhara from "./pages/Istikhara";
+import Dhikr from "./pages/Dhikr";
 import NotFound from "./pages/NotFound";
 import PreAuth from "./pages/PreAuth";
 import { ConfirmProvider } from "./components/common/Confirm";
@@ -19,11 +20,12 @@ const PUBLIC_PATHS = /^\/meet\/[A-Za-z0-9_-]{6,64}$/;
 
 function Splash() {
   return (
-    <div className="bg-aurora flex min-h-screen flex-col items-center justify-center gap-5">
-      <div className="animate-pulse">
-        <Logo size={48} />
+    <div className="bg-aurora flex min-h-[100dvh] flex-col items-center justify-center gap-4">
+      <Logo size={46} />
+      <div className="flex items-center gap-2.5 rounded-full border border-accent/25 bg-surface/80 px-4 py-1.5 text-xs font-semibold text-muted shadow-sm backdrop-blur">
+        <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-accent/25 border-t-accent" />
+        <span>در حال آماده‌سازی…</span>
       </div>
-      <p className="text-sm text-muted">در حال آماده‌سازی…</p>
     </div>
   );
 }
@@ -70,6 +72,10 @@ function Screens({ initialPath }) {
       document.title = "استخاره با قرآن — inebuly";
       return;
     }
+    if (path === "/dhikr") {
+      document.title = "ذکر و زیارت روز — inebuly";
+      return;
+    }
     if (path !== "/" && !AUTH_PATHS.includes(path)) {
       document.title = "صفحه پیدا نشد — inebuly";
     }
@@ -81,6 +87,7 @@ function Screens({ initialPath }) {
     else if (status === "guest") mainScreen = <PreAuth mode={path === "/register" ? "register" : "login"} />;
     else if (path === "/admin") mainScreen = <Admin />;
     else if (path === "/istikhara") mainScreen = <Istikhara />;
+    else if (path === "/dhikr") mainScreen = <Dhikr />;
     else if (path === "/" || AUTH_PATHS.includes(path)) mainScreen = <Chat />;
     else mainScreen = <NotFound />;
   }

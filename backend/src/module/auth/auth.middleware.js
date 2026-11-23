@@ -45,9 +45,6 @@ export const validateProfile = (req) => {
     input.displayName = displayName;
   }
   if (typeof req.body.bio === "string") input.bio = req.body.bio.slice(0, 200);
-  if (typeof req.body.avatarColor === "string" && AVATAR_COLORS.includes(req.body.avatarColor)) {
-    input.avatarColor = req.body.avatarColor;
-  }
   const newPassword = text(req.body.newPassword, 128);
   if (newPassword) {
     if (newPassword.length < 6) throw new HttpError(400, "رمز جدید باید حداقل ۶ کاراکتر باشد");

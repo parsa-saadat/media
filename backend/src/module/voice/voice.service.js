@@ -115,6 +115,7 @@ async function snapshot(me, chatId, after, afterAudio = 0) {
         avatarColor: user.avatarColor,
         avatarFileId: user.avatarFileId ?? null,
         micOn: p.micOn,
+        connState: p.connState ?? "connecting",
         sharingOn: !!p.sharingOn,
         shareQuality: p.shareQuality ?? "720p",
         joinToken: p.joinToken,
@@ -179,6 +180,7 @@ export async function joinVoice(me, chatId, input = {}) {
     await upsertPresence(chatId, me.id, {
       joinToken: existing.joinToken,
       micOn: false,
+      connState: "connecting",
       sharingOn: false,
       shareQuality: "720p",
       lastSeenAt: new Date(),
@@ -205,7 +207,7 @@ export async function joinVoice(me, chatId, input = {}) {
   // joining are delivered on the first poll instead of being skipped.
   const baseline = (await findLastSignal({ conversationId: chatId, toUserId: me.id }))?._id ?? 0;
   const joinToken = generateJoinToken();
-  await upsertPresence(chatId, me.id, { joinToken, micOn: false, sharingOn: false, shareQuality: "720p", lastSeenAt: new Date() });
+  await upsertPresence(chatId, me.id, { joinToken, micOn: false, connState: "connecting", sharingOn: false, shareQuality: "720p", lastSeenAt: new Date() });
   await stopTracks({ _id: voiceKey(chatId, me.id) });
   const latestAudio = voiceAudioRelay.get(chatId)?.at(-1)?.id ?? 0;
   return { joinToken, ...(await snapshot(me, chatId, baseline, latestAudio)), cursor: baseline };
@@ -239,6 +241,12 @@ export async function setMic(me, chatId, joinToken, on) {
   await updatePresences({ _id: voiceKey(chatId, me.id) }, { micOn: on, lastSeenAt: new Date() });
 }
 
+export async function setConnState(me, chatId, joinToken, state) {
+  await requireVoiceRoom(me, chatId);
+  await requirePresence(chatId, me.id, joinToken);
+  await updatePresences({ _id: voiceKey(chatId, me.id) }, { connState: state, lastSeenAt: new Date() });
+}
+
 /** Start or stop sharing the screen; quality is only a hint the sender applies to the capture. */
 export async function setShare(me, chatId, joinToken, on, quality) {
   await requireVoiceRoom(me, chatId);
@@ -247,7 +255,7 @@ export async function setShare(me, chatId, joinToken, on, quality) {
     if (!me.permissions.includes("screen.share")) throw new HttpError(403, "نقش شما اجازهٔ اشتراک صفحه ندارد");
     if ((await ownRestrictions(chatId, me.id)).shareBlocked) throw new HttpError(403, "مدیر اشتراک صفحهٔ شما را بسته است");
   }
-  const q = ["360p", "720p", "1080p"].includes(quality) ? quality : "720p";
+  const q = ["360p", "480p", "720p", "1080p"].includes(quality) ? quality : "720p";
   await updatePresences({ _id: voiceKey(chatId, me.id) }, { sharingOn: on, shareQuality: q, lastSeenAt: new Date() });
 }
 

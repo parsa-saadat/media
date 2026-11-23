@@ -31,6 +31,9 @@ export const action = async (req, res) => {
     case "mic":
       await voiceService.setMic(req.me, chatId, input.joinToken, input.on);
       break;
+    case "conn-state":
+      await voiceService.setConnState(req.me, chatId, input.joinToken, input.state);
+      break;
     case "share":
       await voiceService.setShare(req.me, chatId, input.joinToken, input.on, input.quality);
       break;

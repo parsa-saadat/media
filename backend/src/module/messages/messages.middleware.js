@@ -24,3 +24,24 @@ export const validateBulkDelete = (req) => {
   if (!ids.length) throw new HttpError(400, "پیامی انتخاب نشده است");
   req.input = { ids };
 };
+
+export const validateForwardMessages = (req) => {
+  const rawMsgs = Array.isArray(req.body.messageIds)
+    ? req.body.messageIds.slice(0, 50)
+    : req.body.messageId
+      ? [req.body.messageId]
+      : [];
+  const messageIds = [...new Set(rawMsgs.map(positiveInt).filter(Boolean))];
+  if (!messageIds.length) throw new HttpError(400, "پیامی برای فوروارد انتخاب نشده است");
+
+  const rawTargets = Array.isArray(req.body.targetConversationIds)
+    ? req.body.targetConversationIds.slice(0, 30)
+    : req.body.targetConversationId
+      ? [req.body.targetConversationId]
+      : [];
+  const targetConversationIds = [...new Set(rawTargets.map(positiveInt).filter(Boolean))];
+  if (!targetConversationIds.length) throw new HttpError(400, "مقصد فوروارد انتخاب نشده است");
+
+  req.input = { messageIds, targetConversationIds };
+};
+

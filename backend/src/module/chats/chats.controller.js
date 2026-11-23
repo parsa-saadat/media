@@ -49,6 +49,14 @@ export const read = async (req, res) => {
   res.json({ ok: true });
 };
 
+export const typing = async (req, res) => {
+  res.json(await chatsService.setTyping(req.me, req.id(), req.body?.typing !== false));
+};
+
+export const typingList = async (req, res) => {
+  res.json(await chatsService.getTyping(req.me, req.id()));
+};
+
 export const rooms = async (req, res) => {
   res.json({ rooms: await chatsService.exploreRooms(req.me, text(req.query.get("q"), 80).trim()) });
 };

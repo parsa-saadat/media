@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { apiFetch, faNum, toast } from "../utils/client";
 import { navigate } from "../utils/router";
 import { useSession } from "../utils/session";
 import ChatView from "../components/chat/ChatView";
+import ChatWallpaperBackdrop from "../components/chat/ChatWallpaperBackdrop";
 import { ConversationList, FriendsPanel, GroupsPanel, MeetingsPanel } from "../components/chat/Panels";
 import Notifications from "../components/common/Notifications";
 import UserProfileModal from "../components/profile/UserProfileModal";
@@ -14,6 +16,51 @@ import { Icon } from "../components/common/Icon";
 import WelcomePopup from "../components/common/WelcomePopup";
 import { ContextMenu, useContextMenu } from "../components/common/ContextMenu";
 import { useConfirm } from "../components/common/Confirm";
+import { usePwaInstall } from "../hooks/usePwaInstall";
+import { playSound } from "../utils/sounds";
+
+function useRailTooltip(label) {
+  const btnRef = useRef(null);
+  const [tip, setTip] = useState(null);
+
+  const show = useCallback(() => {
+    const el = btnRef.current;
+    if (!el || typeof window === "undefined" || window.innerWidth < 768) return;
+    const rect = el.getBoundingClientRect();
+    setTip({
+      right: Math.max(8, window.innerWidth - rect.left + 10),
+      top: rect.top + rect.height / 2,
+    });
+  }, []);
+
+  const hide = useCallback(() => setTip(null), []);
+
+  useEffect(() => {
+    if (!tip) return;
+    window.addEventListener("scroll", hide, true);
+    window.addEventListener("resize", hide);
+    return () => {
+      window.removeEventListener("scroll", hide, true);
+      window.removeEventListener("resize", hide);
+    };
+  }, [tip, hide]);
+
+  const portal =
+    tip && typeof document !== "undefined"
+      ? createPortal(
+          <span
+            dir="rtl"
+            style={{ right: tip.right, top: tip.top }}
+            className="popover-blur pointer-events-none fixed z-[150] -translate-y-1/2 whitespace-nowrap rounded-xl border border-line px-3 py-1.5 text-[11.5px] font-extrabold text-fg shadow-2xl"
+          >
+            {label}
+          </span>,
+          document.body,
+        )
+      : null;
+
+  return { btnRef, show, hide, portal };
+}
 
 function RailButton({
   active,
@@ -22,24 +69,65 @@ function RailButton({
   badge,
   children,
 }) {
+  const { btnRef, show, hide, portal } = useRailTooltip(label);
   return (
-    <button
-      onClick={onClick}
-      title={label}
-      className={`group press relative flex h-12 w-12 items-center justify-center rounded-lg ${
-        active ? "grad-accent text-on-accent glow" : "text-muted hover:bg-surface-2 hover:text-fg"
-      }`}
-    >
-      {children}
-      {!!badge && (
-        <span className="absolute -left-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-rose-500 px-1 text-[10px] font-bold text-white ring-2 ring-surface">
-          {faNum(badge > 99 ? 99 : badge)}
-        </span>
-      )}
-      <span className="pointer-events-none absolute right-14 z-30 whitespace-nowrap rounded-lg bg-surface-3 px-2 py-1 text-xs text-fg opacity-0 shadow-lg transition group-hover:opacity-100">
-        {label}
-      </span>
-    </button>
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        onClick={() => {
+          hide();
+          onClick?.();
+        }}
+        onMouseEnter={show}
+        onMouseLeave={hide}
+        onFocus={show}
+        onBlur={hide}
+        aria-label={label}
+        className={`press relative flex h-10 w-10 items-center justify-center rounded-xl border transition ${
+          active
+            ? "border-accent/45 bg-accent/18 text-accent shadow-[0_4px_16px_rgb(var(--glow)/0.18)]"
+            : "border-transparent text-muted hover:bg-surface-2 hover:text-fg"
+        }`}
+      >
+        {children}
+        {!!badge && (
+          <span className="absolute -left-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-rose-500 px-1 text-[9.5px] font-black text-white ring-2 ring-surface">
+            {faNum(badge > 99 ? 99 : badge)}
+          </span>
+        )}
+      </button>
+      {portal}
+    </>
+  );
+}
+
+function RailProfileButton({ me, onClick, onContextMenu }) {
+  const { btnRef, show, hide, portal } = useRailTooltip("پروفایل من");
+  return (
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        onClick={() => {
+          hide();
+          onClick();
+        }}
+        onContextMenu={(e) => {
+          hide();
+          onContextMenu(e);
+        }}
+        onMouseEnter={show}
+        onMouseLeave={hide}
+        onFocus={show}
+        onBlur={hide}
+        aria-label="پروفایل من"
+        className="press relative mt-1"
+      >
+        <Avatar name={me.displayName} color={me.avatarColor} size={42} userId={me.id} avatarFileId={me.avatarFileId} status={toPresence(me.status)} />
+      </button>
+      {portal}
+    </>
   );
 }
 
@@ -58,11 +146,24 @@ export default function Chat() {
   const [isMobile, setIsMobile] = useState(false);
   const { confirm } = useConfirm();
   const { menu, open: openMenu, close: closeMenu } = useContextMenu();
+  const { canInstall, isIos, promptInstall } = usePwaInstall();
   const [daily, setDaily] = useState(null);
-  // desktop: draggable sidebar width
+
+  const handleInstallApp = useCallback(async () => {
+    const res = await promptInstall();
+    if (res.outcome === "accepted") {
+      toast("نصب برنامه آغاز شد", "success");
+    } else if (res.outcome === "ios-manual") {
+      toast("در Safari روی دکمهٔ Share و سپس Add to Home Screen بزنید", "info");
+    }
+  }, [promptInstall]);
+  // desktop: draggable sidebar width (raised min width so conversation/meeting/friend cards never crush text)
+  const MIN_LIST = 296;
+  const MAX_LIST = 540;
+  const DEFAULT_LIST = 324;
   const [listWidth, setListWidth] = useState(() => {
-    if (typeof window === "undefined") return 340;
-    try { return Math.min(560, Math.max(260, Number(localStorage.getItem("voxsy-list-width")) || 340)); } catch { return 340; }
+    if (typeof window === "undefined") return DEFAULT_LIST;
+    try { return Math.min(MAX_LIST, Math.max(MIN_LIST, Number(localStorage.getItem("voxsy-list-width")) || DEFAULT_LIST)); } catch { return DEFAULT_LIST; }
   });
   const dragRef = useRef(null);
   useEffect(() => {
@@ -74,9 +175,6 @@ export default function Chat() {
   const listWidthRef = useRef(listWidth);
   listWidthRef.current = listWidth;
 
-  const MIN_LIST = 260;
-  const MAX_LIST = 560;
-  const DEFAULT_LIST = 340;
   const clampList = (n) => Math.min(MAX_LIST, Math.max(MIN_LIST, Math.round(n)));
   const saveListWidth = (n) => {
     try { localStorage.setItem("voxsy-list-width", String(n)); } catch {}
@@ -129,14 +227,91 @@ export default function Chat() {
     saveListWidth(DEFAULT_LIST);
   }, []);
 
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
+  const knownLastMsgRef = useRef(new Map());
+  const convBootstrappedRef = useRef(false);
+
+  const openConversation = useCallback((id) => {
+    setActiveId(id);
+    setTab("chats");
+  }, []);
+
+  // Support deep-linking via `/?chat=123` (e.g. from notification clicks)
+  useEffect(() => {
+    const syncFromUrl = () => {
+      if (typeof window === "undefined") return;
+      const params = new URLSearchParams(window.location.search);
+      const chatParam = Number(params.get("chat"));
+      if (Number.isFinite(chatParam) && chatParam > 0) {
+        setActiveId(chatParam);
+        setTab("chats");
+        window.history.replaceState({}, "", window.location.pathname);
+      }
+    };
+    syncFromUrl();
+    window.addEventListener("popstate", syncFromUrl);
+    return () => window.removeEventListener("popstate", syncFromUrl);
+  }, []);
+
   const loadConvs = useCallback(async () => {
     try {
       const d = await apiFetch("/api/conversations");
-      setConvs(d.conversations);
+      const list = d.conversations || [];
+
+      if (convBootstrappedRef.current) {
+        for (const c of list) {
+          const lm = c.lastMessage;
+          if (!lm?.id) continue;
+          const prevId = knownLastMsgRef.current.get(c.id);
+          if (prevId !== undefined && lm.id > prevId) {
+            const isFromOther = lm.senderId && lm.senderId !== me.id;
+            const isViewingNow =
+              activeIdRef.current === c.id &&
+              typeof document !== "undefined" &&
+              document.visibilityState === "visible";
+            if (isFromOther && !isViewingNow && c.type !== "saved") {
+              playSound("message");
+              const preview =
+                lm.type === "voice"
+                  ? "🎤 پیام صوتی"
+                  : lm.type === "image"
+                    ? "🖼️ تصویر"
+                    : lm.type === "video"
+                      ? "🎬 ویدیو"
+                      : lm.type === "file"
+                        ? "📎 فایل پیوست"
+                        : lm.type === "album"
+                          ? "🖼️ آلبوم رسانه"
+                          : lm.content || "پیام جدید";
+              const senderName = lm.senderName || c.peer?.displayName || c.name;
+              const title = c.type === "group" ? `${senderName} در «${c.name}»` : senderName;
+              toast({
+                kind: "incoming-message",
+                title,
+                body: preview,
+                senderId: lm.senderId || c.peer?.id,
+                senderName,
+                avatarColor: lm.senderColor || c.peer?.avatarColor || "#7c3aed",
+                avatarFileId: lm.senderAvatarFileId || c.peer?.avatarFileId || null,
+                onClick: () => {
+                  setActiveId(c.id);
+                  setTab("chats");
+                },
+              });
+            }
+          }
+        }
+      }
+      for (const c of list) {
+        knownLastMsgRef.current.set(c.id, c.lastMessage?.id ?? 0);
+      }
+      convBootstrappedRef.current = true;
+      setConvs(list);
     } catch {
       /* an expired session is handled once, globally, by the session provider */
     }
-  }, []);
+  }, [me.id]);
 
   const loadFriends = useCallback(async () => {
     try {
@@ -179,13 +354,12 @@ export default function Chat() {
     document.title = `${prefix}${section} — inebuly`;
   }, [totalUnread, tab, activeConv]);
 
-  const openConversation = useCallback(
+  const openConversationWithRefresh = useCallback(
     (id) => {
-      setActiveId(id);
-      setTab("chats");
-      loadConvs();
+      openConversation(id);
+      void loadConvs();
     },
-    [loadConvs]
+    [openConversation, loadConvs]
   );
 
   const openMeeting = useCallback((token) => navigate(`/meet/${token}`), []);
@@ -194,12 +368,12 @@ export default function Chat() {
     async (opts) => {
       try {
         const d = await apiFetch("/api/direct", { method: "POST", json: opts });
-        openConversation(d.conversationId);
+        openConversationWithRefresh(d.conversationId);
       } catch (e) {
         toast(e.message, "error");
       }
     },
-    [openConversation]
+    [openConversationWithRefresh]
   );
 
   const logout = session.logout;
@@ -244,6 +418,15 @@ export default function Chat() {
             </button>
             <button
               type="button"
+              onClick={() => navigate("/dhikr")}
+              title="ذکر و زیارت روز"
+              aria-label="ذکر و زیارت روز"
+              className="press flex h-9 w-9 items-center justify-center rounded-xl bg-surface-2 text-muted transition hover:bg-surface-3 hover:text-accent"
+            >
+              <Icon name="sparkles" size={18} />
+            </button>
+            <button
+              type="button"
               onClick={() => navigate("/istikhara")}
               title="استخاره با قرآن"
               aria-label="استخاره با قرآن"
@@ -251,7 +434,10 @@ export default function Chat() {
             >
               <Icon name="book" size={18} />
             </button>
-            <Notifications onOpenProfile={() => setProfileOpen(true)} />
+            <Notifications
+              onOpenProfile={() => setProfileOpen(true)}
+              onOpenConversation={openConversationWithRefresh}
+            />
             <button
               type="button"
               onClick={() => setSettingsOpen(true)}
@@ -267,36 +453,48 @@ export default function Chat() {
 
       <div className="flex min-h-0 flex-1">
         {/* Desktop nav rail (right side in RTL) */}
-        <nav className="hidden w-[72px] shrink-0 flex-col items-center gap-2 border-l border-line bg-surface/60 py-4 md:flex">
+        <nav className="relative z-40 hidden w-[62px] shrink-0 flex-col items-center gap-1.5 border-l border-line bg-surface/80 py-3 backdrop-blur md:flex">
           <RailButton label="گفتگوها" active={tab === "chats"} onClick={() => setTab("chats")} badge={totalUnread}>
-            <Icon name="chat" size={22} />
+            <Icon name="chat" size={20} />
           </RailButton>
           <RailButton label="گروه‌های من" active={tab === "groups"} onClick={() => setTab("groups")}>
-            <Icon name="users" size={22} />
+            <Icon name="users" size={20} />
           </RailButton>
           <RailButton label="جلسه‌ها (میت)" active={tab === "meetings"} onClick={() => setTab("meetings")}>
-            <Icon name="radio" size={22} />
+            <Icon name="radio" size={20} />
           </RailButton>
           <RailButton label="دوستان" active={tab === "friends"} onClick={() => setTab("friends")} badge={incoming}>
-            <Icon name="user" size={22} />
+            <Icon name="user" size={20} />
+          </RailButton>
+          <RailButton label="ذکر و زیارت روز" onClick={() => navigate("/dhikr")}>
+            <Icon name="sparkles" size={20} />
           </RailButton>
           <RailButton label="استخاره با قرآن" onClick={() => navigate("/istikhara")}>
-            <Icon name="book" size={22} />
+            <Icon name="book" size={20} />
           </RailButton>
           <RailButton label="پیام‌های ذخیره‌شده" active={tab === "chats" && activeConv?.type === "saved"} onClick={() => void openDirect({ saved: true })}>
-            <Icon name="bookmark" size={21} />
+            <Icon name="bookmark" size={19} />
           </RailButton>
           {canAdmin && (
             <RailButton label="پنل مدیریت" onClick={() => navigate("/admin")}>
-              <Icon name="shield" size={22} />
+              <Icon name="shield" size={20} />
             </RailButton>
           )}
           <div className="flex-1" />
-          <Notifications onOpenProfile={() => setProfileOpen(true)} />
+          {canInstall && (
+            <RailButton label={isIos ? "نصب وب‌اپ (Add to Home Screen)" : "نصب برنامه (PWA)"} onClick={() => void handleInstallApp()}>
+              <Icon name="app-install" size={20} />
+            </RailButton>
+          )}
+          <Notifications
+            onOpenProfile={() => setProfileOpen(true)}
+            onOpenConversation={openConversationWithRefresh}
+          />
           <RailButton label="تنظیمات و تم" onClick={() => setSettingsOpen(true)}>
-            <Icon name="settings" size={22} />
+            <Icon name="settings" size={20} />
           </RailButton>
-          <button
+          <RailProfileButton
+            me={me}
             onClick={() => setProfileOpen(true)}
             onContextMenu={(event) => {
               const items = [
@@ -304,6 +502,7 @@ export default function Chat() {
                 { type: "item", key: "profile", label: "پروفایل من", icon: "user", onClick: () => setProfileOpen(true) },
                 { type: "item", key: "saved", label: "پیام‌های ذخیره‌شده", icon: "bookmark", onClick: () => void openDirect({ saved: true }) },
                 { type: "item", key: "settings", label: "تنظیمات", icon: "settings", onClick: () => setSettingsOpen(true) },
+                { type: "item", key: "dhikr", label: "ذکر و زیارت روز", icon: "sparkles", onClick: () => navigate("/dhikr") },
                 { type: "item", key: "istikhara", label: "استخاره با قرآن", icon: "book", onClick: () => navigate("/istikhara") },
                 { type: "divider" },
                 { type: "item", key: "logout", label: "خروج از حساب", icon: "logout", danger: true, onClick: () => void (async () => {
@@ -313,12 +512,7 @@ export default function Chat() {
               ];
               openMenu(event, items);
             }}
-            title="پروفایل من"
-            aria-label="پروفایل من"
-            className="press relative mt-1"
-          >
-            <Avatar name={me.displayName} color={me.avatarColor} size={42} userId={me.id} avatarFileId={me.avatarFileId} status={toPresence(me.status)} />
-          </button>
+          />
         </nav>
 
         {/* List panel */}
@@ -333,14 +527,14 @@ export default function Chat() {
             <ConversationList
               convs={convs}
               activeId={activeId}
-              onOpen={openConversation}
+              onOpen={openConversationWithRefresh}
               onOpenSaved={() => void openDirect({ saved: true })}
               onOpenProfile={(userId) => setViewProfileId(userId)}
               onCreate={(t) => setCreateOpen(t)}
               me={me}
             />
           )}
-          {tab === "groups" && <GroupsPanel me={me} onOpen={openConversation} onCreate={() => setCreateOpen("group")} />}
+          {tab === "groups" && <GroupsPanel me={me} onOpen={openConversationWithRefresh} onCreate={() => setCreateOpen("group")} />}
           {tab === "meetings" && <MeetingsPanel me={me} onOpenMeeting={openMeeting} />}
           {tab === "friends" && (
             <FriendsPanel data={friends} reload={loadFriends} onMessage={(userId) => openDirect({ userId })} onProfile={(userId) => setViewProfileId(userId)} me={me} />
@@ -370,12 +564,13 @@ export default function Chat() {
         </div>
 
         {/* Main */}
-        <main className={`${activeId || !isMobile ? "flex" : "hidden"} min-w-0 flex-1 flex-col pb-[env(safe-area-inset-bottom)] md:pb-0`}>
+        <main className={`${activeId || !isMobile ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 flex-col pb-[env(safe-area-inset-bottom)] md:pb-0`}>
           {activeId ? (
             <ChatView
               key={activeId}
               conversationId={activeId}
               me={me}
+              convs={convs || []}
               friends={friends?.friends || []}
               onBack={() => setActiveId(null)}
               onChanged={loadConvs}
@@ -387,23 +582,35 @@ export default function Chat() {
               onOpenProfile={(userId) => setViewProfileId(userId)}
             />
           ) : (
-            <div className="relative flex flex-1 flex-col items-center justify-center overflow-hidden p-5 text-center lg:p-10">
-              <div className="pointer-events-none absolute -left-24 top-10 h-72 w-72 rounded-full bg-accent/12 blur-3xl" />
-              <div className="pointer-events-none absolute -right-24 bottom-0 h-72 w-72 rounded-full bg-accent-2/10 blur-3xl" />
-              <figure className="anim-fade-up relative z-10 w-full max-w-2xl">
-                <div className="flex items-center justify-center gap-2">
-                  <Icon name={daily?.kind === "hadith" ? "quote" : "book"} size={18} className="text-accent" />
-                  <span className="text-[11px] font-black tracking-[0.2em] text-muted">{daily?.label ?? "آیهٔ روز"}</span>
+            <div className="relative flex flex-1 flex-col items-center justify-center overflow-hidden p-4 text-center sm:p-8">
+              <ChatWallpaperBackdrop />
+
+              <figure className="anim-fade-up relative z-10 flex w-full max-w-2xl flex-col items-center justify-center rounded-3xl border border-line/80 bg-surface/72 px-6 py-7 shadow-[0_20px_60px_rgba(0,0,0,.22)] backdrop-blur-xl sm:px-10 sm:py-9">
+                <div className="inline-flex items-center gap-2 rounded-full border border-accent/25 bg-accent/10 px-3.5 py-1">
+                  <Icon name={daily?.kind === "hadith" ? "quote" : "book"} size={14} className="text-accent" />
+                  <span className="text-[11px] font-black tracking-[0.14em] text-accent">{daily?.label ?? "آیهٔ روز"}</span>
                 </div>
-                <blockquote key={daily?.id} className="anim-fade-in mt-5">
+
+                <blockquote key={daily?.id} className="anim-fade-in mt-5 w-full">
                   {daily ? (
                     <>
-                      <p className="text-base font-bold leading-8 text-fg sm:text-lg sm:leading-9">{daily.fa}</p>
-                      {daily.ar && <p className="quran-text mt-4 text-2xl leading-[2.2] text-fg/70 sm:text-3xl" dir="rtl">{daily.ar}</p>}
-                      <figcaption className="mt-4 text-[11px] font-bold text-accent">{daily.source}</figcaption>
+                      {daily.ar && (
+                        <p className="quran-text line-clamp-3 text-xl leading-[2.05] text-fg/90 sm:text-2xl md:text-[26px]" dir="rtl">
+                          {daily.ar}
+                        </p>
+                      )}
+                      <p className="mx-auto mt-3.5 max-w-xl line-clamp-4 text-sm font-bold leading-7 text-fg/85 sm:text-base sm:leading-8">
+                        {daily.fa}
+                      </p>
+                      {daily.source && (
+                        <figcaption className="mt-4 inline-flex items-center gap-1.5 rounded-lg bg-surface-2/80 px-3 py-1 text-[11px] font-bold text-muted">
+                          <span className="h-1.5 w-1.5 rounded-full bg-accent" />
+                          {daily.source}
+                        </figcaption>
+                      )}
                     </>
                   ) : (
-                    <p className="mt-6 text-sm text-muted">در حال دریافت آیهٔ روز…</p>
+                    <p className="py-4 text-xs text-muted">در حال دریافت آیهٔ روز…</p>
                   )}
                 </blockquote>
               </figure>
@@ -476,13 +683,13 @@ export default function Chat() {
               <button
                 type="button"
                 onClick={() => { setMobileMenuOpen(false); setProfileOpen(true); }}
-                className="grad-accent press rounded-xl px-3 py-2 text-xs font-bold text-on-accent"
+                className="grad-accent press shrink-0 whitespace-nowrap rounded-xl px-3 py-2 text-xs font-bold text-on-accent"
               >
                 پروفایل من
               </button>
             </div>
 
-            <div className="mt-3 grid grid-cols-2 gap-2">
+            <div className="mt-3 grid grid-cols-1 gap-2 min-[380px]:grid-cols-2">
               <button
                 type="button"
                 onClick={() => { setMobileMenuOpen(false); setSettingsOpen(true); }}
@@ -508,6 +715,20 @@ export default function Chat() {
                 <div className="min-w-0">
                   <p className="text-xs font-bold text-fg">پیام‌های ذخیره‌شده</p>
                   <p className="truncate text-[10px] text-muted">فضای ابری شخصی</p>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => { setMobileMenuOpen(false); navigate("/dhikr"); }}
+                className="press flex items-center gap-2.5 rounded-xl border border-line bg-surface-2 p-3 text-right hover:bg-surface-3"
+              >
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-teal-400/15 text-teal-300">
+                  <Icon name="sparkles" size={18} />
+                </span>
+                <div className="min-w-0">
+                  <p className="text-xs font-bold text-fg">ذکر و زیارت روز</p>
+                  <p className="truncate text-[10px] text-muted">اذکار هفته، تسبیحات و دعای فرج</p>
                 </div>
               </button>
 
@@ -569,11 +790,29 @@ export default function Chat() {
                 </div>
               </button>
 
+              {canInstall && (
+                <button
+                  type="button"
+                  onClick={() => { setMobileMenuOpen(false); void handleInstallApp(); }}
+                  className="press flex items-center gap-2.5 rounded-xl border border-accent/30 bg-accent/12 p-3 text-right hover:bg-accent/20 min-[380px]:col-span-2"
+                >
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-accent/35 bg-accent/20 text-accent">
+                    <Icon name="app-install" size={18} />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs font-black text-fg">نصب اپلیکیشن inebuly</p>
+                    <p className="truncate text-[10px] text-muted">
+                      {isIos ? "در Safari از گزینهٔ Share و Add to Home Screen استفاده کنید" : "نصب سریع روی صفحهٔ اصلی بدون نیاز به فروشگاه"}
+                    </p>
+                  </div>
+                </button>
+              )}
+
               {canAdmin && (
                 <button
                   type="button"
                   onClick={() => { setMobileMenuOpen(false); navigate("/admin"); }}
-                  className="press col-span-2 flex items-center gap-2.5 rounded-xl border border-accent/30 bg-accent/10 p-3 text-right hover:bg-accent/20"
+                  className="press flex items-center gap-2.5 rounded-xl border border-accent/30 bg-accent/10 p-3 text-right hover:bg-accent/20 min-[380px]:col-span-2"
                 >
                   <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-accent text-on-accent">
                     <Icon name="shield" size={18} />
@@ -623,7 +862,7 @@ export default function Chat() {
         friends={friends?.friends || []}
         onCreated={(id) => {
           setCreateOpen(null);
-          openConversation(id);
+          openConversationWithRefresh(id);
         }}
       />
       <ProfileModal me={me} open={profileOpen} onClose={() => setProfileOpen(false)} onSaved={reloadMe} onMessage={(userId) => { setProfileOpen(false); void openDirect({ userId }); }} />

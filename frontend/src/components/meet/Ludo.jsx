@@ -5,12 +5,16 @@ import { Dice } from "./Dice";
 const SEAT_COLORS = ["#ef4444", "#22c55e", "#f59e0b", "#3b82f6"];
 const SEAT_NAMES = ["قرمز", "سبز", "زرد", "آبی"];
 
+const HOME_ENTRY = 51;
+const HOME_END = 54;
+
 /**
  * 52-cell clockwise outer track on a 15×15 grid (rows 0..14, cols 0..14).
- * Seat 0 (Red, top-left yard [0,0]):     starts at idx 0  = [6,1]  (left arm),   home stretch [7,1..5]
- * Seat 1 (Green, top-right yard [0,9]):  starts at idx 13 = [1,8]  (top arm),    home stretch [1..5,7]
- * Seat 2 (Yellow, bot-right yard [9,9]): starts at idx 26 = [8,13] (right arm),  home stretch [7,13..9]
- * Seat 3 (Blue, bot-left yard [9,0]):    starts at idx 39 = [13,6] (bottom arm), home stretch [13..9,7]
+ * Each player has strictly 4 pieces and 4 private home cells (steps 51..54):
+ * Seat 0 (Red, top-left yard [0,0]):     starts at idx 0  = [6,1],  home slots [7,1..4]
+ * Seat 1 (Green, top-right yard [0,9]):  starts at idx 13 = [1,8],  home slots [1..4,7]
+ * Seat 2 (Yellow, bot-right yard [9,9]): starts at idx 26 = [8,13], home slots [7,13..10]
+ * Seat 3 (Blue, bot-left yard [9,0]):    starts at idx 39 = [13,6], home slots [13..10,7]
  */
 const TRACK = [
   [6, 1], [6, 2], [6, 3], [6, 4], [6, 5],
@@ -27,14 +31,15 @@ const TRACK = [
   [7, 0], [6, 0],
 ];
 
+// Strictly 4 home cells per player (steps 51, 52, 53, 54)
 const HOME = [
-  [[7, 1], [7, 2], [7, 3], [7, 4], [7, 5]],     // Seat 0 Red -> left-to-center
-  [[1, 7], [2, 7], [3, 7], [4, 7], [5, 7]],     // Seat 1 Green -> top-to-center
-  [[7, 13], [7, 12], [7, 11], [7, 10], [7, 9]], // Seat 2 Yellow -> right-to-center
-  [[13, 7], [12, 7], [11, 7], [10, 7], [9, 7]], // Seat 3 Blue -> bottom-to-center
+  [[7, 1], [7, 2], [7, 3], [7, 4]],     // Seat 0 Red -> left-to-center (4 cells)
+  [[1, 7], [2, 7], [3, 7], [4, 7]],     // Seat 1 Green -> top-to-center (4 cells)
+  [[7, 13], [7, 12], [7, 11], [7, 10]], // Seat 2 Yellow -> right-to-center (4 cells)
+  [[13, 7], [12, 7], [11, 7], [10, 7]], // Seat 3 Blue -> bottom-to-center (4 cells)
 ];
 
-// Yard top-left [row, col] matching each seat's start arm!
+// Yard top-left [row, col] matching each seat's start arm
 const YARDS = [
   [0, 0], // Seat 0 Red: top-left
   [0, 9], // Seat 1 Green: top-right
@@ -50,15 +55,14 @@ const START_BY_INDEX = new Map([
   [39, 3],
 ]);
 
-// Finish nest positions inside each seat's center triangle (row, col fractional centres on 15×15 grid)
-const FINISH_SPOTS = [
-  [[7.0, 6.35], [6.65, 6.35], [7.35, 6.35], [7.0, 6.65]], // Seat 0 left triangle
-  [[6.35, 7.0], [6.35, 6.65], [6.35, 7.35], [6.65, 7.0]], // Seat 1 top triangle
-  [[7.0, 8.65], [6.65, 8.65], [7.35, 8.65], [7.0, 8.35]], // Seat 2 right triangle
-  [[8.65, 7.0], [8.65, 6.65], [8.65, 7.35], [8.35, 7.0]], // Seat 3 bottom triangle
-];
+function normalizePos(step, slot) {
+  if (typeof step !== "number" || step < 0) return -1;
+  if (step > HOME_END) return HOME_ENTRY + (slot % 4);
+  return step;
+}
 
-function tokenRC(seat, slot, step) {
+function tokenRC(seat, slot, rawStep) {
+  const step = normalizePos(rawStep, slot);
   if (step === -1) {
     const [yr, yc] = YARDS[seat];
     const offsets = [
@@ -67,14 +71,12 @@ function tokenRC(seat, slot, step) {
       [4.15, 1.85],
       [4.15, 4.15],
     ];
-    const [dr, dc] = offsets[slot];
+    const [dr, dc] = offsets[slot % 4];
     return [yr + dr, yc + dc];
   }
-  if (step === 56) {
-    return FINISH_SPOTS[seat][slot];
-  }
-  if (step >= 51) {
-    const [r, c] = HOME[seat][step - 51];
+  if (step >= HOME_ENTRY) {
+    const homeIdx = Math.min(3, Math.max(0, step - HOME_ENTRY));
+    const [r, c] = HOME[seat][homeIdx];
     return [r + 0.5, c + 0.5];
   }
   const [r, c] = TRACK[(step + seat * 13) % 52];
@@ -83,18 +85,22 @@ function tokenRC(seat, slot, step) {
 
 function legalTokens(tokens, seat, dice) {
   if (!dice) return new Set();
-  const mine = tokens[seat] ?? [];
+  const mine = (tokens[seat] ?? []).slice(0, 4);
   const out = new Set();
-  mine.forEach((pos, idx) => {
+  mine.forEach((rawPos, idx) => {
+    const pos = normalizePos(rawPos, idx);
     const to = pos === -1 ? (dice === 6 ? 0 : -99) : pos + dice;
-    if (to < 0 || to > 56) return;
+    if (to < 0 || to > HOME_END) return;
+    if (to >= HOME_ENTRY && mine.some((other, oIdx) => oIdx !== idx && normalizePos(other, oIdx) === to)) {
+      return;
+    }
     out.add(idx);
   });
   return out;
 }
 
 function cloneTokens(tokens) {
-  return Array.isArray(tokens) ? tokens.map((arr) => (Array.isArray(arr) ? [...arr] : [])) : [];
+  return Array.isArray(tokens) ? tokens.map((arr) => (Array.isArray(arr) ? arr.slice(0, 4) : [])) : [];
 }
 
 export default function Ludo({ game, myToken, onMove, busy, rolling }) {
@@ -125,10 +131,8 @@ export default function Ludo({ game, myToken, onMove, busy, rolling }) {
       const mSeat = lastMove.seat;
       const mTok = lastMove.token;
       const from = Number(lastMove.from ?? -1);
-      const to = Number(lastMove.to ?? 0);
+      const to = Math.min(HOME_END, Number(lastMove.to ?? 0));
 
-      // Build step-by-step cell positions:
-      // If leaving yard (-1 -> 0), single hop onto start square 0; otherwise hop from+1 .. to
       const steps = [];
       if (from === -1 && to === 0) {
         steps.push(0);
@@ -137,7 +141,6 @@ export default function Ludo({ game, myToken, onMove, busy, rolling }) {
       }
 
       if (steps.length > 0) {
-        // Hold moving pawn at `from` initially (and if capturing, hold captured pawn until arrival!)
         setDispTokens((prev) => {
           const base = cloneTokens(prev.length ? prev : tokens);
           if (base[mSeat]) base[mSeat][mTok] = from;
@@ -172,11 +175,12 @@ export default function Ludo({ game, myToken, onMove, busy, rolling }) {
   const animating = hopPawn !== null;
   const movable = myTurn && rolled && !animating ? legalTokens(tokens, seat, dice) : new Set();
 
-  // Compute collision offsets so stacked pawns on the same track/home cell fan out neatly
+  // Compute collision offsets so stacked pawns on the same outer-track cell fan out neatly
   const coordGroups = new Map();
   game.players.forEach((_, s) => {
-    (dispTokens[s] ?? []).forEach((pos, t) => {
-      if (pos < 0 || pos >= 56) return;
+    (dispTokens[s] ?? []).slice(0, 4).forEach((rawPos, t) => {
+      const pos = normalizePos(rawPos, t);
+      if (pos < 0 || pos >= HOME_ENTRY) return;
       const [r, c] = tokenRC(s, t, pos);
       const key = `${r.toFixed(1)}:${c.toFixed(1)}`;
       if (!coordGroups.has(key)) coordGroups.set(key, []);
@@ -190,11 +194,11 @@ export default function Ludo({ game, myToken, onMove, busy, rolling }) {
 
   return (
     <div className="flex flex-col items-center gap-3">
-      {/* Player badges using authentic Ludo seat colors */}
+      {/* Player badges using authentic Mensch seat colors (strictly 4 pieces: X/۴) */}
       <div className="grid w-full max-w-md grid-cols-2 gap-1.5 sm:flex sm:flex-wrap sm:justify-center">
         {game.players.map((p, i) => {
           const active = i === seat && game.status === "playing";
-          const homeCount = (tokens[i] ?? []).filter((x) => x === 56).length;
+          const homeCount = (tokens[i] ?? []).slice(0, 4).filter((x, idx) => normalizePos(x, idx) >= HOME_ENTRY).length;
           const seatColor = SEAT_COLORS[i];
           return (
             <div
@@ -216,13 +220,13 @@ export default function Ludo({ game, myToken, onMove, busy, rolling }) {
         })}
       </div>
 
-      {/* Theme-integrated 15x15 Ludo board */}
+      {/* Theme-integrated 15x15 Mensch board (4 yard circles & 4 home slots per player) */}
       <div className="relative aspect-square w-full max-w-md overflow-hidden rounded-xl border border-line bg-surface p-2 shadow-xl">
         <svg viewBox="0 0 150 150" className="h-full w-full select-none rounded-lg">
           {/* Base board background */}
           <rect x="0" y="0" width="150" height="150" rx="4" style={{ fill: "var(--surface)" }} />
 
-          {/* Four 6x6 corner yards */}
+          {/* Four 6x6 corner yards (4 pieces each) */}
           {YARDS.map(([yr, yc], i) => {
             const activePlayer = i < game.players.length;
             const c = SEAT_COLORS[i];
@@ -322,45 +326,63 @@ export default function Ludo({ game, myToken, onMove, busy, rolling }) {
             );
           })}
 
-          {/* Four 5-cell colored home stretches */}
+          {/* Four 4-cell colored home lanes (numbered ۱..۴) */}
           {HOME.map((cells, s) =>
             cells.map(([r, c], k) => (
-              <rect
-                key={`h-${s}-${k}`}
-                x={c * 10 + 0.45}
-                y={r * 10 + 0.45}
-                width="9.1"
-                height="9.1"
-                rx="1.4"
-                fill={SEAT_COLORS[s]}
-                fillOpacity="0.34"
-                stroke={SEAT_COLORS[s]}
-                strokeOpacity="0.75"
-                strokeWidth="0.6"
-              />
+              <g key={`h-${s}-${k}`}>
+                <circle
+                  cx={c * 10 + 5}
+                  cy={r * 10 + 5}
+                  r="4.35"
+                  fill={SEAT_COLORS[s]}
+                  fillOpacity="0.34"
+                  stroke={SEAT_COLORS[s]}
+                  strokeOpacity="0.85"
+                  strokeWidth="0.7"
+                />
+                <text
+                  x={c * 10 + 5}
+                  y={r * 10 + 6.1}
+                  fontSize="3.2"
+                  fontWeight="800"
+                  textAnchor="middle"
+                  fill={SEAT_COLORS[s]}
+                  opacity="0.85"
+                >
+                  {faNum(k + 1)}
+                </text>
+              </g>
             )),
           )}
 
-          {/* Center 3x3 home goal: triangles strictly aligned with each seat's home stretch! */}
+          {/* Center emblem (clean trophy medallion surrounded by the 4 home lanes) */}
           <g>
-            {/* Left triangle -> Seat 0 (Red) */}
-            <polygon points="60,60 60,90 75,75" fill={SEAT_COLORS[0]} fillOpacity="0.85" stroke="var(--surface)" strokeWidth="0.7" />
-            {/* Top triangle -> Seat 1 (Green) */}
-            <polygon points="60,60 90,60 75,75" fill={SEAT_COLORS[1]} fillOpacity="0.85" stroke="var(--surface)" strokeWidth="0.7" />
-            {/* Right triangle -> Seat 2 (Yellow) */}
-            <polygon points="90,60 90,90 75,75" fill={SEAT_COLORS[2]} fillOpacity="0.85" stroke="var(--surface)" strokeWidth="0.7" />
-            {/* Bottom triangle -> Seat 3 (Blue) */}
-            <polygon points="60,90 90,90 75,75" fill={SEAT_COLORS[3]} fillOpacity="0.85" stroke="var(--surface)" strokeWidth="0.7" />
-            <rect x="60" y="60" width="30" height="30" rx="2" fill="none" stroke="var(--line)" strokeWidth="0.8" />
-            <circle cx="75" cy="75" r="3.4" style={{ fill: "var(--surface)", stroke: "var(--line)" }} strokeWidth="0.6" />
+            <rect
+              x="54"
+              y="54"
+              width="42"
+              height="42"
+              rx="10"
+              style={{ fill: "var(--surface-2)", stroke: "var(--line)" }}
+              strokeWidth="0.7"
+              opacity="0.7"
+            />
+            <polygon points="62,62 62,88 75,75" fill={SEAT_COLORS[0]} fillOpacity="0.72" />
+            <polygon points="62,62 88,62 75,75" fill={SEAT_COLORS[1]} fillOpacity="0.72" />
+            <polygon points="88,62 88,88 75,75" fill={SEAT_COLORS[2]} fillOpacity="0.72" />
+            <polygon points="62,88 88,88 75,75" fill={SEAT_COLORS[3]} fillOpacity="0.72" />
+            <rect x="62" y="62" width="26" height="26" rx="3" fill="none" stroke="var(--line)" strokeWidth="0.8" />
+            <circle cx="75" cy="75" r="5.2" style={{ fill: "var(--surface)", stroke: "var(--line)" }} strokeWidth="0.7" />
+            <text x="75" y="76.6" fontSize="5" textAnchor="middle">👑</text>
           </g>
 
-          {/* Tokens: rendered in seat color, with smooth step-by-step CSS transition + hop bounce */}
+          {/* Tokens: 4 pieces per player, rendered in seat color with step-by-step hop bounce */}
           {game.players.map((_, s) =>
-            (dispTokens[s] ?? []).map((pos, t) => {
+            (dispTokens[s] ?? []).slice(0, 4).map((rawPos, t) => {
+              const pos = normalizePos(rawPos, t);
               const [r, c] = tokenRC(s, t, pos);
               const groupKey = `${r.toFixed(1)}:${c.toFixed(1)}`;
-              const stack = pos >= 0 && pos < 56 ? coordGroups.get(groupKey) ?? [] : [];
+              const stack = pos >= 0 && pos < HOME_ENTRY ? coordGroups.get(groupKey) ?? [] : [];
               const stackIdx = stack.indexOf(`${s}:${t}`);
               let dx = 0;
               let dy = 0;
@@ -374,6 +396,7 @@ export default function Ludo({ game, myToken, onMove, busy, rolling }) {
               const canPick = s === seat && movable.has(t) && !busy;
               const isHopping = hopPawn?.seat === s && hopPawn?.token === t;
               const pieceColor = SEAT_COLORS[s];
+              const inHome = pos >= HOME_ENTRY;
 
               return (
                 <g
@@ -386,20 +409,20 @@ export default function Ludo({ game, myToken, onMove, busy, rolling }) {
                   }}
                 >
                   {canPick && (
-                    <circle r="5.3" fill="none" stroke="#ffffff" strokeWidth="0.9" strokeDasharray="1.8 1.4">
+                    <circle r="5.3" fill="none" stroke="var(--fg)" strokeWidth="0.9" strokeDasharray="1.8 1.4">
                       <animate attributeName="r" values="4.4;5.8;4.4" dur="1.05s" repeatCount="indefinite" />
                       <animate attributeName="opacity" values="0.95;0.45;0.95" dur="1.05s" repeatCount="indefinite" />
                     </circle>
                   )}
                   <g key={isHopping ? hopTick : 0} className={isHopping ? "anim-pawn-hop" : ""}>
-                    <circle r={pos === 56 ? 2.6 : 3.5} cy="0.55" fill="rgba(0,0,0,0.42)" />
+                    <circle r="3.5" cy="0.55" fill="rgba(0,0,0,0.42)" />
                     <circle
-                      r={pos === 56 ? 2.5 : 3.4}
+                      r="3.4"
                       fill={pieceColor}
                       stroke="#ffffff"
-                      strokeWidth={canPick ? "1.1" : "0.75"}
+                      strokeWidth={canPick ? "1.1" : inHome ? "0.95" : "0.75"}
                     />
-                    <circle r={pos === 56 ? 0.9 : 1.3} cy="-0.65" fill="rgba(255,255,255,0.45)" />
+                    <circle r="1.3" cy="-0.65" fill="rgba(255,255,255,0.45)" />
                   </g>
                 </g>
               );
@@ -418,7 +441,7 @@ export default function Ludo({ game, myToken, onMove, busy, rolling }) {
             </span>
           )}
           {message && (
-            <span className="font-semibold text-amber-300">
+            <span className="font-semibold text-accent">
               {lastRoll ? "· " : ""}
               {message}
             </span>

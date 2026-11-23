@@ -51,18 +51,26 @@ export default function Istikhara() {
     <div className="bg-aurora flex h-[100dvh] flex-col overflow-hidden">
       <main className="scroll-thin scroll-smooth-y flex-1 overflow-y-auto p-4 sm:p-8">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
-          <div className="anim-rise flex items-center gap-3">
-            <button onClick={() => navigate("/")} aria-label="بازگشت" className="press flex h-10 w-10 items-center justify-center rounded-lg border border-line bg-surface-2 text-muted hover:text-fg">
+          <div className="anim-rise flex flex-wrap items-center gap-3">
+            <button onClick={() => navigate("/")} aria-label="بازگشت" className="press flex h-10 w-10 items-center justify-center rounded-xl border border-line bg-surface-2/80 text-muted backdrop-blur-md hover:bg-surface-3 hover:text-fg">
               <Icon name="arrow-right" size={18} />
             </button>
             <div className="min-w-0 flex-1">
               <h1 className="text-xl font-black">استخاره با قرآن</h1>
               <p className="text-[11px] text-muted">به روش سنتی: نخستین آیهٔ صفحهٔ سمت راستِ مصحف — متن از Al Quran Cloud</p>
             </div>
+            <button
+              type="button"
+              onClick={() => navigate("/dhikr")}
+              className="press flex items-center gap-1.5 rounded-xl border border-accent/35 bg-accent/14 px-3.5 py-2 text-xs font-bold text-accent backdrop-blur-md hover:bg-accent/24"
+            >
+              <Icon name="sparkles" size={15} />
+              <span>ذکر و زیارت روز</span>
+            </button>
           </div>
 
           {/* preparation */}
-          <section className="anim-rise rounded-xl border border-line bg-surface/70 backdrop-blur" style={{ animationDelay: "40ms" }}>
+          <section className="anim-rise rounded-2xl border border-line bg-surface/75 backdrop-blur-xl" style={{ animationDelay: "40ms" }}>
             <button onClick={() => setShowSteps((s) => !s)} className="flex w-full items-center justify-between px-5 py-4 text-right" aria-expanded={showSteps}>
               <span className="flex items-center gap-2 text-sm font-bold"><Icon name="book" size={17} className="text-accent" /> آداب استخاره (پیش از گشودن)</span>
               <Icon name="chevron-down" size={16} className={`text-muted transition-transform duration-300 ${showSteps ? "rotate-180" : ""}`} />
@@ -87,7 +95,7 @@ export default function Istikhara() {
           </section>
 
           {/* intention + options */}
-          <section className="anim-rise rounded-xl border border-line bg-surface/70 p-5 backdrop-blur" style={{ animationDelay: "80ms" }}>
+          <section className="anim-rise rounded-2xl border border-line bg-surface/75 p-5 backdrop-blur-xl" style={{ animationDelay: "80ms" }}>
             <label className="block text-xs font-bold text-muted" htmlFor="istikhara-question">نیّت شما (اختیاری — فقط برای خودتان؛ جایی ذخیره نمی‌شود)</label>
             <textarea
               id="istikhara-question"
@@ -95,17 +103,21 @@ export default function Istikhara() {
               onChange={(e) => setQuestion(e.target.value)}
               rows={2}
               placeholder="مثلاً: آیا این سفر را بروم؟"
-              className="ring-glow mt-2 w-full resize-none rounded-lg border border-line bg-surface-2 px-4 py-3 text-sm outline-none"
+              className="ring-glow mt-2 w-full resize-none rounded-xl border border-line bg-surface-2/80 px-4 py-3 text-sm backdrop-blur-md outline-none"
             />
             <div className="mt-4 flex flex-wrap items-center gap-3">
               <label className="flex items-center gap-2 text-xs text-muted">
                 <span>ترجمه</span>
-                <select value={translation} onChange={(e) => setTranslation(e.target.value)} className="rounded-lg border border-line bg-surface-2 px-3 py-2 text-xs text-fg outline-none">
+                <select value={translation} onChange={(e) => setTranslation(e.target.value)} className="rounded-xl border border-line bg-surface-2/85 px-3 py-2 text-xs text-fg backdrop-blur-md outline-none">
                   {(translations.length ? translations : [{ id: "fa.makarem", name: "مکارم شیرازی" }]).map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
                 </select>
               </label>
-              <button onClick={() => void draw()} disabled={phase === "opening"} className="grad-accent glow press ms-auto flex items-center gap-2 rounded-lg px-6 py-3 text-sm font-bold text-on-accent disabled:opacity-60">
-                {phase === "opening" ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" /> : <Icon name="book" size={17} />}
+              <button
+                onClick={() => void draw()}
+                disabled={phase === "opening"}
+                className="press ms-auto flex items-center gap-2 rounded-xl border border-accent/50 bg-accent/22 px-6 py-2.5 text-sm font-black text-accent shadow-[0_8px_28px_rgb(var(--glow)/0.22)] backdrop-blur-xl transition hover:border-accent hover:bg-accent/32 disabled:opacity-55"
+              >
+                {phase === "opening" ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-accent/35 border-t-accent" /> : <Icon name="book" size={17} />}
                 {phase === "opening" ? "در حال گشودن قرآن…" : result ? "گشودن دوباره" : "گشودن قرآن"}
               </button>
             </div>
@@ -120,7 +132,7 @@ export default function Istikhara() {
           )}
 
           {result && v && phase === "done" && (
-            <section key={`${result.page}-${result.ayah}`} className="anim-rise overflow-hidden rounded-xl border border-line bg-surface shadow-2xl">
+            <section key={`${result.page}-${result.ayah}`} className="anim-rise overflow-hidden rounded-2xl border border-line bg-surface/85 shadow-2xl backdrop-blur-2xl">
               <div className="grad-accent h-1.5 w-full" />
               <div className="p-6">
                 <div className="flex flex-wrap items-center gap-2 text-[11px]">
@@ -154,9 +166,9 @@ export default function Istikhara() {
                 </div>
 
                 <div className="mt-4 flex flex-wrap gap-2">
-                  <button onClick={() => void draw()} className="press flex items-center gap-1.5 rounded-lg border border-line bg-surface-2 px-4 py-2 text-xs font-bold text-fg hover:bg-surface-3"><Icon name="refresh" size={14} /> گشودن دوباره</button>
-                  <button onClick={() => { void navigator.clipboard?.writeText(`${result.arabic}\n${result.translation}\n(${result.surah.name}، آیهٔ ${result.ayah})`).then(() => toast("آیه کپی شد", "success")).catch(() => toast("کپی انجام نشد", "error")); }} className="press flex items-center gap-1.5 rounded-lg border border-line bg-surface-2 px-4 py-2 text-xs font-bold text-fg hover:bg-surface-3"><Icon name="copy" size={14} /> کپی آیه</button>
-                  <button onClick={() => navigate("/")} className="press flex items-center gap-1.5 rounded-lg border border-line bg-surface-2 px-4 py-2 text-xs font-bold text-muted hover:text-fg"><Icon name="arrow-right" size={14} /> بازگشت به گفتگوها</button>
+                  <button onClick={() => void draw()} className="press flex items-center gap-1.5 rounded-xl border border-accent/40 bg-accent/16 px-4 py-2 text-xs font-bold text-accent backdrop-blur-md hover:bg-accent/26"><Icon name="refresh" size={14} /> گشودن دوباره</button>
+                  <button onClick={() => { void navigator.clipboard?.writeText(`${result.arabic}\n${result.translation}\n(${result.surah.name}، آیهٔ ${result.ayah})`).then(() => toast("آیه کپی شد", "success")).catch(() => toast("کپی انجام نشد", "error")); }} className="press flex items-center gap-1.5 rounded-xl border border-line bg-surface-2/80 px-4 py-2 text-xs font-bold text-fg backdrop-blur-md hover:bg-surface-3"><Icon name="copy" size={14} /> کپی آیه</button>
+                  <button onClick={() => navigate("/")} className="press flex items-center gap-1.5 rounded-xl border border-line bg-surface-2/80 px-4 py-2 text-xs font-bold text-muted backdrop-blur-md hover:text-fg"><Icon name="arrow-right" size={14} /> بازگشت به گفتگوها</button>
                 </div>
               </div>
             </section>

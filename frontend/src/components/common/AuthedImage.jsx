@@ -9,7 +9,8 @@ import { Icon } from "./Icon";
 const blobCache = new Map();
 const MAX_CACHED_IMAGES = 120;
 
-function rememberBlob(fileId, blob) {
+export function rememberBlob(fileId, blob) {
+  if (!fileId || !blob) return;
   if (blobCache.has(fileId)) blobCache.delete(fileId);
   blobCache.set(fileId, blob);
   if (blobCache.size > MAX_CACHED_IMAGES) {

@@ -3,24 +3,59 @@ import { apiFetch, getBrowserId, toast } from "../utils/client";
 import { playSound } from "../utils/sounds";
 import { createSpeakingDetector, emitMicLevel } from "../utils/micMeter";
 import { createRelayAudioPlayer, createRelayAudioSender } from "../utils/liveAudioRelay";
-import { RTC_CONFIG, watchIce } from "../config/rtc";
+import {
+  buildMicConstraints,
+  createMicAudioPipeline,
+  DEFAULT_AUDIO_PREFS,
+  readAudioPrefs,
+  saveAudioPrefs,
+  subscribeAudioPrefs,
+} from "../utils/audioPrefs";
 
-const DEFAULT_PREFS = { inputId: "", outputId: "", master: 100, micGain: 100, volumes: {} };
+const DEFAULT_PREFS = DEFAULT_AUDIO_PREFS;
 
-/** Resolutions the stream/camera pickers offer; fps is applied on top of each. */
+/** Resolutions + target bitrates the stream/camera pickers offer; fps is applied on top of each. */
 const QUALITY_CONSTRAINTS = {
-  "480p": { width: 854, height: 480 },
-  "720p": { width: 1280, height: 720 },
-  "1080p": { width: 1920, height: 1080 },
+  "480p": { width: 854, height: 480, screenBitrate: 1_100_000, cameraBitrate: 650_000 },
+  "720p": { width: 1280, height: 720, screenBitrate: 2_800_000, cameraBitrate: 1_500_000 },
+  "1080p": { width: 1920, height: 1080, screenBitrate: 6_000_000, cameraBitrate: 3_200_000 },
 };
 
-function readPrefs() {
+async function applyVideoSenderEncoding(sender, track, { quality, fps, isScreen }) {
+  if (!sender || !track || typeof sender.getParameters !== "function") return;
+  const spec = QUALITY_CONSTRAINTS[quality] ?? QUALITY_CONSTRAINTS["720p"];
+  const targetFps = Math.max(15, Number(fps) || 30);
+  const fpsBoost = targetFps >= 60 ? 1.35 : 1;
+  const maxBitrate = Math.round((isScreen ? spec.screenBitrate : spec.cameraBitrate) * fpsBoost);
   try {
-    const raw = JSON.parse(localStorage.getItem("voxsy-voice-settings") || "{}");
-    return { ...DEFAULT_PREFS, ...raw, volumes: raw.volumes || {} };
+    if ("contentHint" in track) {
+      track.contentHint = isScreen ? (targetFps >= 60 ? "motion" : "detail") : "motion";
+    }
+  } catch {}
+  try {
+    const settings = track.getSettings?.() || {};
+    const srcHeight = Number(settings.height) || spec.height;
+    const scaleDown = srcHeight > spec.height ? Math.max(1, Number((srcHeight / spec.height).toFixed(2))) : 1;
+    const params = sender.getParameters() || {};
+    if (!Array.isArray(params.encodings) || params.encodings.length === 0) {
+      params.encodings = [{}];
+    }
+    params.degradationPreference = isScreen ? "maintain-resolution" : "balanced";
+    for (const enc of params.encodings) {
+      enc.maxBitrate = maxBitrate;
+      enc.maxFramerate = targetFps;
+      enc.scaleResolutionDownBy = scaleDown;
+      if ("priority" in enc || isScreen) enc.priority = "high";
+      if ("networkPriority" in enc || isScreen) enc.networkPriority = "high";
+    }
+    await sender.setParameters(params);
   } catch {
-    return DEFAULT_PREFS;
+    /* fallback if browser restricts some RTCRtpEncodingParameters fields */
   }
+}
+
+function readPrefs() {
+  return readAudioPrefs();
 }
 
 /**
@@ -35,6 +70,7 @@ export function useMeeting(token, me) {
   const [participants, setParticipants] = useState([]);
   const [myState, setMyState] = useState({ inLobby: false, micMuted: false, shareBlocked: false });
   const [amHost, setAmHost] = useState(false);
+  const [lobbyEnabled, setLobbyEnabled] = useState(false);
   const [joinToken, setJoinToken] = useState("");
   const [micOn, setMicOn] = useState(false);
   const [speaking, setSpeaking] = useState(false);
@@ -53,6 +89,7 @@ export function useMeeting(token, me) {
   const [devices, setDevices] = useState([]);
   const [serverTimeDelta, setServerTimeDelta] = useState(0);
   const [game, setGame] = useState(null);
+  const [myConnState, setMyConnState] = useState("connecting");
 
   const prefsRef = useRef(prefs);
   const prefsReady = useRef(false);
@@ -60,6 +97,8 @@ export function useMeeting(token, me) {
   const micOnRef = useRef(false);
   const myStateRef = useRef(myState);
   const participantsRef = useRef([]);
+  const joinedTimestampRef = useRef(0);
+  const lastReportedConnRef = useRef("");
   const peers = useRef(new Map());
   const cursor = useRef(0);
   const audioCursor = useRef(0);
@@ -71,9 +110,11 @@ export function useMeeting(token, me) {
   const screenTrack = useRef(null);
   const cameraStream = useRef(null);
   const cameraTrack = useRef(null);
+  const shareCfgRef = useRef({ quality: "720p", fps: 30 });
+  const cameraCfgRef = useRef({ quality: "720p", fps: 30 });
   const audioCtx = useRef(null);
-  const gainNode = useRef(null);
-  const levelFrame = useRef(0);
+  const micPipelineRef = useRef(null);
+  const hookInstanceId = useRef(`meet-${Math.random().toString(36).slice(2, 9)}`);
   const busy = useRef(false);
   const alive = useRef(true);
   const elements = useRef(new Map());
@@ -86,11 +127,7 @@ export function useMeeting(token, me) {
   useEffect(() => {
     prefsRef.current = prefs;
     if (!prefsReady.current) return;
-    try {
-      localStorage.setItem("voxsy-voice-settings", JSON.stringify(prefs));
-    } catch {
-      /* storage blocked */
-    }
+    micPipelineRef.current?.updatePrefs(prefs);
   }, [prefs]);
 
   const refreshDevices = useCallback(async () => {
@@ -110,7 +147,16 @@ export function useMeeting(token, me) {
     setPrefs(saved);
     void refreshDevices();
     navigator.mediaDevices?.addEventListener?.("devicechange", refreshDevices);
-    return () => navigator.mediaDevices?.removeEventListener?.("devicechange", refreshDevices);
+    const unsub = subscribeAudioPrefs((next, src) => {
+      if (src === hookInstanceId.current) return;
+      prefsRef.current = next;
+      setPrefs(next);
+      micPipelineRef.current?.updatePrefs(next);
+    });
+    return () => {
+      navigator.mediaDevices?.removeEventListener?.("devicechange", refreshDevices);
+      unsub();
+    };
   }, [refreshDevices]);
 
   const call = useCallback(
@@ -261,6 +307,13 @@ export function useMeeting(token, me) {
             peer.cameraTransceiver.direction = wantDir;
             changed = true;
           }
+          if (wantCam) {
+            await applyVideoSenderEncoding(peer.cameraTransceiver.sender, wantCam, {
+              quality: cameraCfgRef.current.quality,
+              fps: cameraCfgRef.current.fps,
+              isScreen: false,
+            });
+          }
         }
         if (peer.screenTransceiver) {
           const wantScreen = screenTrack.current ?? null;
@@ -271,6 +324,13 @@ export function useMeeting(token, me) {
           if (peer.screenTransceiver.direction !== wantDir) {
             peer.screenTransceiver.direction = wantDir;
             changed = true;
+          }
+          if (wantScreen) {
+            await applyVideoSenderEncoding(peer.screenTransceiver.sender, wantScreen, {
+              quality: shareCfgRef.current.quality,
+              fps: shareCfgRef.current.fps,
+              isScreen: true,
+            });
           }
         }
       } catch (err) {
@@ -283,12 +343,59 @@ export function useMeeting(token, me) {
     [negotiatePeer],
   );
 
+  /** Evaluates our live WebRTC / audio-relay connection state and syncs changes to the server so all peers see it. */
+  const recomputeConnState = useCallback(() => {
+    const mine = myToken.current;
+    if (!mine) return;
+    if (myStateRef.current.inLobby) {
+      setMyConnState("connecting");
+      return;
+    }
+    const others = participantsRef.current.filter((p) => !p.inLobby && p.joinToken !== mine);
+    let next = "connected";
+    if (others.length > 0) {
+      let connectedCount = 0;
+      let reconnectingCount = 0;
+      for (const p of others) {
+        const peer = peers.current.get(p.joinToken);
+        const cs = peer?.pc?.connectionState;
+        const ice = peer?.pc?.iceConnectionState;
+        if (cs === "connected" || ice === "connected" || ice === "completed") {
+          connectedCount++;
+        } else if (cs === "disconnected" || cs === "failed" || ice === "disconnected" || ice === "failed") {
+          reconnectingCount++;
+        }
+      }
+      if (connectedCount === others.length) {
+        next = "connected";
+      } else if (reconnectingCount > 0 && connectedCount === 0) {
+        next = Date.now() - joinedTimestampRef.current > 3500 ? "relay" : "reconnecting";
+      } else if (Date.now() - joinedTimestampRef.current > 3500) {
+        // After 3.5s while ICE is still negotiating, server HTTPS audio relay is actively carrying voice
+        next = "relay";
+      } else {
+        next = "connecting";
+      }
+    }
+    setMyConnState(next);
+    if (lastReportedConnRef.current !== next) {
+      lastReportedConnRef.current = next;
+      setParticipants((list) => list.map((p) => (p.joinToken === mine ? { ...p, connState: next } : p)));
+      void call({ action: "conn-state", state: next }).catch(() => {});
+    }
+  }, [call]);
+
   const createPeer = useCallback(
     (other, isInitiator = false) => {
       const existing = peers.current.get(other.joinToken);
       if (existing) return existing;
-      const pc = new RTCPeerConnection(RTC_CONFIG);
-      watchIce(pc, `meet:${other.joinToken.slice(0, 6)}`);
+      const pc = new RTCPeerConnection({
+        iceServers: [
+          { urls: "stun:stun.l.google.com:19302" },
+          { urls: "stun:stun1.l.google.com:19302" },
+          { urls: "stun:stun.cloudflare.com:3478" },
+        ],
+      });
       // Deterministic politeness for glare resolution: lexicographically larger token is polite.
       const polite = myToken.current > other.joinToken;
       const peer = {
@@ -316,13 +423,29 @@ export function useMeeting(token, me) {
           direction: cameraTrack.current ? "sendrecv" : "recvonly",
           streams: cameraStream.current ? [cameraStream.current] : [],
         });
-        if (cameraTrack.current) void peer.cameraTransceiver.sender.replaceTrack(cameraTrack.current).catch(() => {});
+        if (cameraTrack.current) {
+          void peer.cameraTransceiver.sender.replaceTrack(cameraTrack.current)
+            .then(() => applyVideoSenderEncoding(peer.cameraTransceiver.sender, cameraTrack.current, {
+              quality: cameraCfgRef.current.quality,
+              fps: cameraCfgRef.current.fps,
+              isScreen: false,
+            }))
+            .catch(() => {});
+        }
 
         peer.screenTransceiver = pc.addTransceiver("video", {
           direction: screenTrack.current ? "sendrecv" : "recvonly",
           streams: screenStream.current ? [screenStream.current] : [],
         });
-        if (screenTrack.current) void peer.screenTransceiver.sender.replaceTrack(screenTrack.current).catch(() => {});
+        if (screenTrack.current) {
+          void peer.screenTransceiver.sender.replaceTrack(screenTrack.current)
+            .then(() => applyVideoSenderEncoding(peer.screenTransceiver.sender, screenTrack.current, {
+              quality: shareCfgRef.current.quality,
+              fps: shareCfgRef.current.fps,
+              isScreen: true,
+            }))
+            .catch(() => {});
+        }
       }
 
       peers.current.set(other.joinToken, peer);
@@ -382,6 +505,10 @@ export function useMeeting(token, me) {
       pc.onconnectionstatechange = () => {
         if (pc.connectionState === "failed" || pc.connectionState === "closed") closePeer(other.joinToken);
         if (pc.connectionState === "connected") playSound("connect");
+        recomputeConnState();
+      };
+      pc.oniceconnectionstatechange = () => {
+        recomputeConnState();
       };
 
       for (const ice of peer.pendingIce.splice(0)) void pc.addIceCandidate(ice).catch(() => {});
@@ -419,10 +546,10 @@ export function useMeeting(token, me) {
           if (peer.ignoringOffer) return;
 
           if (offerCollision && peer.polite) {
-            // Must be sequential: running rollback and setRemoteDescription in parallel races and throws,
-            // which used to tear the whole peer connection down (and left the two sides out of sync).
-            await peer.pc.setLocalDescription({ type: "rollback" }).catch(() => {});
-            await peer.pc.setRemoteDescription(description);
+            await Promise.all([
+              peer.pc.setLocalDescription({ type: "rollback" }).catch(() => {}),
+              peer.pc.setRemoteDescription(description),
+            ]);
           } else {
             await peer.pc.setRemoteDescription(description);
           }
@@ -461,17 +588,15 @@ export function useMeeting(token, me) {
 
   /* ── microphone ── */
   const stopMic = useCallback(() => {
-    if (levelFrame.current) cancelAnimationFrame(levelFrame.current);
-    levelFrame.current = 0;
     if (speakingDetector.current.reset()) setSpeaking(false);
     emitMicLevel(0);
+    micPipelineRef.current?.close();
+    micPipelineRef.current = null;
+    audioCtx.current = null;
     micStream.current?.getTracks().forEach((t) => t.stop());
     micStream.current = null;
     micTrack.current?.stop();
     micTrack.current = null;
-    if (audioCtx.current) void audioCtx.current.close().catch(() => {});
-    audioCtx.current = null;
-    gainNode.current = null;
   }, []);
 
   const openMic = useCallback(
@@ -479,7 +604,7 @@ export function useMeeting(token, me) {
       if (!navigator.mediaDevices?.getUserMedia) throw new Error("این مرورگر دسترسی میکروفون ندارد");
       const id = deviceId ?? prefsRef.current.inputId;
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { ...(id ? { deviceId: { ideal: id } } : {}), echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        audio: buildMicConstraints(prefsRef.current, id),
       });
       if (!alive.current) {
         stream.getTracks().forEach((t) => t.stop());
@@ -487,55 +612,46 @@ export function useMeeting(token, me) {
       }
       const previousStream = micStream.current;
       const previousTrack = micTrack.current;
-      const previousCtx = audioCtx.current;
+      const previousPipeline = micPipelineRef.current;
       let outTrack = stream.getAudioTracks()[0];
-      try {
-        const ctx = new AudioContext();
-        if (ctx.state === "suspended") void ctx.resume().catch(() => {});
-        const source = ctx.createMediaStreamSource(stream);
-        const gain = ctx.createGain();
-        gain.gain.value = prefsRef.current.micGain / 100;
-        const dest = ctx.createMediaStreamDestination();
-        source.connect(gain).connect(dest);
-        outTrack = dest.stream.getAudioTracks()[0];
-        audioCtx.current = ctx;
-        gainNode.current = gain;
-        const analyser = ctx.createAnalyser();
-        analyser.fftSize = 256;
-        source.connect(analyser);
-        const data = new Uint8Array(analyser.frequencyBinCount);
-        let last = 0;
-        if (levelFrame.current) cancelAnimationFrame(levelFrame.current);
-        const measure = (t) => {
-          if (t - last > 60) {
-            analyser.getByteTimeDomainData(data);
-            let sum = 0;
-            for (const v of data) sum += (v - 128) ** 2;
-            const level = Math.min(100, Math.round(Math.sqrt(sum / data.length) * 5));
-            emitMicLevel(level);
-            if (speakingDetector.current.push(level)) setSpeaking(speakingDetector.current.get());
-            last = t;
-          }
-          levelFrame.current = requestAnimationFrame(measure);
-        };
-        levelFrame.current = requestAnimationFrame(measure);
-      } catch {
-        audioCtx.current = null;
-        gainNode.current = null;
-      }
       const shouldEnable = micOnRef.current && !myStateRef.current.micMuted;
-      outTrack.enabled = shouldEnable;
+      // Enable raw microphone track immediately so WebAudio graph receives real samples!
       stream.getAudioTracks().forEach((t) => {
-        t.enabled = shouldEnable;
+        t.enabled = true;
       });
+      try {
+        const pipe = createMicAudioPipeline(stream, prefsRef.current, {
+          onLevel: (rawLevel, gateOpen) => {
+            const active = !myToken.current || (micOnRef.current && !myStateRef.current.micMuted);
+            const level = active ? rawLevel : 0;
+            emitMicLevel(level);
+            const effectiveSpeakingLevel = prefsRef.current.vadEnabled && !gateOpen ? 0 : level;
+            if (speakingDetector.current.push(effectiveSpeakingLevel)) {
+              setSpeaking(speakingDetector.current.get());
+            }
+          },
+        });
+        micPipelineRef.current = pipe;
+        audioCtx.current = pipe.context;
+        if (pipe.outputTrack) outTrack = pipe.outputTrack;
+      } catch {
+        micPipelineRef.current = null;
+        audioCtx.current = null;
+      }
+      outTrack.enabled = shouldEnable;
+      if (!audioCtx.current) {
+        stream.getAudioTracks().forEach((t) => {
+          t.enabled = shouldEnable;
+        });
+      }
       micStream.current = stream;
       micTrack.current = outTrack;
       for (const [peerToken, peer] of peers.current.entries()) {
         await syncLocalMediaToPeer(peer, peerToken, true);
       }
+      previousPipeline?.close();
       previousStream?.getTracks().forEach((t) => t.stop());
       if (previousTrack && previousTrack !== previousStream?.getAudioTracks()[0]) previousTrack.stop();
-      if (previousCtx) void previousCtx.close().catch(() => {});
       await refreshDevices();
     },
     [refreshDevices, syncLocalMediaToPeer],
@@ -558,15 +674,31 @@ export function useMeeting(token, me) {
     busy.current = true;
     const mine = myToken.current;
     try {
-      const data = await apiFetch(`/api/meetings/${token}/state?joinToken=${encodeURIComponent(mine)}&after=${cursor.current}`);
+      const data = await apiFetch(
+        `/api/meetings/${token}/state?joinToken=${encodeURIComponent(mine)}&after=${cursor.current}&afterAudio=${audioCursor.current}`,
+      );
       if (!alive.current || myToken.current !== mine) return;
       cursor.current = data.cursor;
+      if (typeof data.audioCursor === "number") audioCursor.current = data.audioCursor;
       participantsRef.current = data.participants;
       setParticipants(data.participants);
+      myStateRef.current = data.myState;
       setMyState(data.myState);
       setAmHost(data.host);
+      if (typeof data.lobby === "boolean") setLobbyEnabled(data.lobby);
       setServerTimeDelta(data.serverTime - Date.now());
       setGame(data.game ?? null);
+
+      // If host force-muted us while mic was on, mute locally immediately
+      if (data.myState.micMuted && micOnRef.current) {
+        micOnRef.current = false;
+        if (micTrack.current) micTrack.current.enabled = false;
+        micStream.current?.getAudioTracks().forEach((t) => {
+          t.enabled = false;
+        });
+        setMicOn(false);
+        setSpeaking(false);
+      }
 
       // If host blocked our share/camera while active, shut them down locally
       if (data.myState.shareBlocked) {
@@ -597,6 +729,27 @@ export function useMeeting(token, me) {
           createPeer(p, true);
         }
       }
+
+      // Play relayed audio chunks for any remote peer whose direct P2P ICE is NOT yet connected!
+      // This eliminates the ~20s WebRTC ICE wait so voice works within <1s!
+      if (Array.isArray(data.audioChunks) && data.audioChunks.length > 0) {
+        if (!relayPlayerRef.current) relayPlayerRef.current = createRelayAudioPlayer();
+        for (const chunk of data.audioChunks) {
+          const peer = peers.current.get(chunk.from);
+          const p2pConnected =
+            peer?.pc?.connectionState === "connected" ||
+            peer?.pc?.iceConnectionState === "connected" ||
+            peer?.pc?.iceConnectionState === "completed";
+          if (p2pConnected) continue;
+          const pObj = data.participants.find((x) => x.joinToken === chunk.from);
+          const v = volumeOf(pObj);
+          if (v > 0) {
+            void relayPlayerRef.current.playChunk(chunk.from, chunk.data, chunk.mime, v);
+          }
+        }
+      }
+
+      recomputeConnState();
     } catch (e) {
       const msg = e.message || "";
       const code = e.body?.code;
@@ -630,7 +783,7 @@ export function useMeeting(token, me) {
     } finally {
       busy.current = false;
     }
-  }, [closePeer, createPeer, handleSignal, stopMic, token]);
+  }, [closePeer, createPeer, handleSignal, recomputeConnState, stopMic, token, volumeOf]);
 
   const join = useCallback(
     async (name, opts = {}) => {
@@ -656,6 +809,9 @@ export function useMeeting(token, me) {
           },
         });
         if (!alive.current) return { ok: false };
+        joinedTimestampRef.current = Date.now();
+        lastReportedConnRef.current = "";
+        setMyConnState("connecting");
         myToken.current = data.joinToken;
         setJoinToken(data.joinToken);
         try {
@@ -669,9 +825,12 @@ export function useMeeting(token, me) {
         cursor.current = data.cursor;
         if (typeof data.audioCursor === "number") audioCursor.current = data.audioCursor;
         participantsRef.current = data.participants;
+        myStateRef.current = data.myState;
         setParticipants(data.participants);
         setMyState(data.myState);
         setAmHost(data.host);
+        if (typeof data.lobby === "boolean") setLobbyEnabled(data.lobby);
+        else if (typeof data.meeting?.lobby === "boolean") setLobbyEnabled(data.meeting.lobby);
         setServerTimeDelta(data.serverTime - Date.now());
         setGame(data.game ?? null);
         // Notify other tabs in the same browser immediately if we took over the meeting
@@ -684,6 +843,36 @@ export function useMeeting(token, me) {
             /* ignore */
           }
         }
+
+        // If user asked to join with microphone ON (default), activate mic immediately and atomically!
+        const wantMic = opts.micEnabled === true && !data.myState.inLobby && !data.myState.micMuted;
+        if (wantMic) {
+          if (!micTrack.current || micTrack.current.readyState === "ended") {
+            try {
+              await openMic();
+              setMicError("");
+            } catch {
+              setMicError("دسترسی به میکروفون داده نشد.");
+            }
+          }
+          if (micTrack.current && micTrack.current.readyState !== "ended") {
+            if (audioCtx.current?.state === "suspended") void audioCtx.current.resume().catch(() => {});
+            micOnRef.current = true;
+            micTrack.current.enabled = true;
+            micStream.current?.getAudioTracks().forEach((t) => {
+              t.enabled = true;
+            });
+            setMicOn(true);
+            setParticipants((list) =>
+              list.map((p) => (p.joinToken === data.joinToken ? { ...p, micOn: true } : p)),
+            );
+            void apiFetch(`/api/meetings/${token}/action`, {
+              method: "POST",
+              json: { action: "mic", on: true, joinToken: data.joinToken },
+            }).catch(() => {});
+          }
+        }
+
         if (!opts.silentSound) playSound(data.myState.inLobby ? "knock" : "join");
         setPhase(data.myState.inLobby ? "lobby" : "joined");
         return { ok: true };
@@ -699,7 +888,7 @@ export function useMeeting(token, me) {
         return { ok: false, code, message: e.message, existingName: e.body?.existingName };
       }
     },
-    [me?.displayName, token],
+    [me?.displayName, openMic, token],
   );
 
   // Auto-rejoin immediately on page refresh if this browser tab already had an active meeting session!
@@ -842,8 +1031,9 @@ export function useMeeting(token, me) {
       micTrack.current?.stop();
       screenStream.current?.getTracks().forEach((t) => t.stop());
       cameraStream.current?.getTracks().forEach((t) => t.stop());
-      if (audioCtx.current) void audioCtx.current.close().catch(() => {});
-      if (levelFrame.current) cancelAnimationFrame(levelFrame.current);
+      micPipelineRef.current?.close();
+      micPipelineRef.current = null;
+      audioCtx.current = null;
       for (const peer of peers.current.values()) peer.pc.close();
       peers.current.clear();
       for (const el of elements.current.values()) {
@@ -868,35 +1058,75 @@ export function useMeeting(token, me) {
     };
   }, [token]);
 
-  /* ── controls ── */
+  // Instant, zero-Lag microphone toggle!
+  // Update local track & UI synchronously FIRST, then notify server & renegotiate in background.
   const toggleMic = useCallback(async () => {
     if (!myToken.current) return;
     if (myStateRef.current.micMuted) return toast("میزبان میکروفون شما را بسته است", "error");
-    if (!micTrack.current) {
+
+    const next = !micOnRef.current;
+
+    // Turning OFF: zero-delay synchronous mute!
+    if (!next) {
+      micOnRef.current = false;
+      if (micTrack.current) micTrack.current.enabled = false;
+      micStream.current?.getAudioTracks().forEach((t) => {
+        t.enabled = false;
+      });
+      setMicOn(false);
+      setSpeaking(false);
+      setParticipants((list) =>
+        list.map((p) => (p.joinToken === myToken.current ? { ...p, micOn: false } : p)),
+      );
+      void call({ action: "mic", on: false }).catch(() => {});
+      return;
+    }
+
+    // Turning ON: acquire mic if missing OR if any underlying track ended, then enable immediately
+    const rawTracks = micStream.current?.getAudioTracks() ?? [];
+    const trackDead =
+      !micTrack.current ||
+      micTrack.current.readyState === "ended" ||
+      rawTracks.length === 0 ||
+      rawTracks.every((t) => t.readyState === "ended");
+    if (trackDead) {
       try {
         await openMic();
         setMicError("");
       } catch {
         setMicError("دسترسی به میکروفون داده نشد؛ از تنظیمات مرورگر اجازه دهید.");
+        toast("دسترسی به میکروفون داده نشد", "error");
         return;
       }
     }
     if (audioCtx.current?.state === "suspended") void audioCtx.current.resume().catch(() => {});
-    const next = !micOnRef.current;
-    try {
-      await call({ action: "mic", on: next });
-      micOnRef.current = next;
-      if (micTrack.current) micTrack.current.enabled = next;
-      micStream.current?.getAudioTracks().forEach((t) => {
-        t.enabled = next;
-      });
-      for (const [peerToken, peer] of peers.current.entries()) {
-        await syncLocalMediaToPeer(peer, peerToken, true);
+    micOnRef.current = true;
+    if (micTrack.current) micTrack.current.enabled = true;
+    micStream.current?.getAudioTracks().forEach((t) => {
+      t.enabled = true;
+    });
+    setMicOn(true);
+    setParticipants((list) =>
+      list.map((p) => (p.joinToken === myToken.current ? { ...p, micOn: true } : p)),
+    );
+    void (async () => {
+      try {
+        await call({ action: "mic", on: true });
+        for (const [peerToken, peer] of peers.current.entries()) {
+          await syncLocalMediaToPeer(peer, peerToken, true);
+        }
+      } catch (e) {
+        if (e?.status === 403) {
+          micOnRef.current = false;
+          if (micTrack.current) micTrack.current.enabled = false;
+          micStream.current?.getAudioTracks().forEach((t) => {
+            t.enabled = false;
+          });
+          setMicOn(false);
+          toast(e.message, "error");
+        }
       }
-      setMicOn(next);
-    } catch (e) {
-      toast(e.message, "error");
-    }
+    })();
   }, [call, openMic, syncLocalMediaToPeer]);
 
   const broadcastMediaUpdate = useCallback(async () => {
@@ -905,18 +1135,23 @@ export function useMeeting(token, me) {
     }
   }, [syncLocalMediaToPeer]);
 
-  const stopShare = useCallback(async () => {
+  // Instant zero-delay screen share stop!
+  const stopShare = useCallback(() => {
     if (screenTrack.current) {
+      screenTrack.current.onended = null;
       screenTrack.current.stop();
       screenTrack.current = null;
       screenStream.current = null;
-      setLocalScreen(null);
     }
-    streamKinds.current.forEach((kind, id) => kind === "screen" && streamKinds.current.delete(id));
-    await broadcastMediaUpdate();
+    setLocalScreen(null);
     setSharing(false);
     setShareError("");
-    if (myToken.current) await call({ action: "share", on: false }).catch(() => {});
+    setParticipants((list) =>
+      list.map((p) => (p.joinToken === myToken.current ? { ...p, sharingOn: false } : p)),
+    );
+    streamKinds.current.forEach((kind, id) => kind === "screen" && streamKinds.current.delete(id));
+    void broadcastMediaUpdate().catch(() => {});
+    if (myToken.current) void call({ action: "share", on: false }).catch(() => {});
   }, [broadcastMediaUpdate, call]);
 
   const startShare = useCallback(
@@ -929,23 +1164,38 @@ export function useMeeting(token, me) {
       try {
         setShareError("");
         const stream = await navigator.mediaDevices.getDisplayMedia({
-          video: { width: { ideal: c.width }, height: { ideal: c.height }, frameRate: { ideal: fps } },
+          video: {
+            width: { ideal: c.width, max: c.width },
+            height: { ideal: c.height, max: c.height },
+            frameRate: { ideal: fps, max: fps },
+          },
           audio: false,
         });
         const track = stream.getVideoTracks()[0];
         if (!track) throw new Error("صفحه‌ای برای اشتراک انتخاب نشد");
+        await track.applyConstraints?.({
+          width: { ideal: c.width, max: c.width },
+          height: { ideal: c.height, max: c.height },
+          frameRate: { ideal: fps, max: fps },
+        }).catch(() => {});
         if (screenTrack.current) screenTrack.current.stop();
         screenStream.current = stream;
         screenTrack.current = track;
+        shareCfgRef.current = { quality, fps };
         setLocalScreen(stream);
         setShareQuality(quality);
         setShareFps(fps);
-        streamKinds.current.set(stream.id, "screen");
-        track.onended = () => void stopShare();
-        await announceKinds(null);
-        await call({ action: "share", on: true, quality, fps });
         setSharing(true);
-        await broadcastMediaUpdate();
+        setParticipants((list) =>
+          list.map((p) => (p.joinToken === myToken.current ? { ...p, sharingOn: true, shareQuality: quality, shareFps: fps } : p)),
+        );
+        streamKinds.current.set(stream.id, "screen");
+        track.onended = () => stopShare();
+        void (async () => {
+          await announceKinds(null).catch(() => {});
+          await call({ action: "share", on: true, quality, fps }).catch(() => {});
+          await broadcastMediaUpdate().catch(() => {});
+        })();
       } catch (e) {
         const msg = e.message || "";
         setShareError(msg.includes("Permission") || msg.includes("NotAllowed") ? "اشتراک صفحه لغو شد" : msg);
@@ -958,26 +1208,53 @@ export function useMeeting(token, me) {
 
   const changeShareQuality = useCallback(
     async (quality, fps) => {
+      const nextFps = fps ?? shareCfgRef.current.fps;
+      shareCfgRef.current = { quality, fps: nextFps };
       setShareQuality(quality);
-      if (fps) setShareFps(fps);
-      if (!sharing) return;
-      await startShare(quality, fps ?? shareFps);
+      setShareFps(nextFps);
+      if (!screenTrack.current) return;
+      const c = QUALITY_CONSTRAINTS[quality] ?? QUALITY_CONSTRAINTS["720p"];
+      try {
+        // Hot-switch resolution & framerate in-place without forcing a new browser picker popup!
+        await screenTrack.current.applyConstraints?.({
+          width: { ideal: c.width, max: c.width },
+          height: { ideal: c.height, max: c.height },
+          frameRate: { ideal: nextFps, max: nextFps },
+        }).catch(() => {});
+        await call({ action: "share", on: true, quality, fps: nextFps }).catch(() => {});
+        for (const peer of peers.current.values()) {
+          if (peer.screenTransceiver) {
+            await applyVideoSenderEncoding(peer.screenTransceiver.sender, screenTrack.current, {
+              quality,
+              fps: nextFps,
+              isScreen: true,
+            });
+          }
+        }
+        toast(`کیفیت اشتراک صفحه به ${quality} (${nextFps}fps) تغییر کرد`, "success");
+      } catch {
+        await startShare(quality, nextFps);
+      }
     },
-    [sharing, shareFps, startShare],
+    [call, startShare],
   );
 
-  /* ── camera ── */
-  const stopCamera = useCallback(async () => {
+  /* ── camera (instant zero-delay stop & immediate start UI) ── */
+  const stopCamera = useCallback(() => {
     if (cameraTrack.current) {
+      cameraTrack.current.onended = null;
       cameraTrack.current.stop();
       cameraTrack.current = null;
       cameraStream.current = null;
-      setLocalCamera(null);
     }
-    streamKinds.current.forEach((kind, id) => kind === "camera" && streamKinds.current.delete(id));
-    await broadcastMediaUpdate();
+    setLocalCamera(null);
     setCameraOn(false);
-    if (myToken.current) await call({ action: "camera", on: false }).catch(() => {});
+    setParticipants((list) =>
+      list.map((p) => (p.joinToken === myToken.current ? { ...p, cameraOn: false } : p)),
+    );
+    streamKinds.current.forEach((kind, id) => kind === "camera" && streamKinds.current.delete(id));
+    void broadcastMediaUpdate().catch(() => {});
+    if (myToken.current) void call({ action: "camera", on: false }).catch(() => {});
   }, [broadcastMediaUpdate, call]);
 
   const startCamera = useCallback(
@@ -988,23 +1265,33 @@ export function useMeeting(token, me) {
       const c = QUALITY_CONSTRAINTS[quality] ?? QUALITY_CONSTRAINTS["720p"];
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { width: { ideal: c.width }, height: { ideal: c.height }, frameRate: { ideal: fps } },
+          video: {
+            width: { ideal: c.width, max: c.width },
+            height: { ideal: c.height, max: c.height },
+            frameRate: { ideal: fps, max: fps },
+          },
         });
         const track = stream.getVideoTracks()[0];
         if (!track) throw new Error("کمرا در دسترس نیست");
         if (cameraTrack.current) cameraTrack.current.stop();
         cameraStream.current = stream;
         cameraTrack.current = track;
+        cameraCfgRef.current = { quality, fps };
         setLocalCamera(stream);
         setCameraQuality(quality);
         setCameraFps(fps);
-        streamKinds.current.set(stream.id, "camera");
-        track.onended = () => void stopCamera();
-        await announceKinds(null);
-        await call({ action: "camera", on: true, quality, fps });
         setCameraOn(true);
-        await broadcastMediaUpdate();
-        await refreshDevices();
+        setParticipants((list) =>
+          list.map((p) => (p.joinToken === myToken.current ? { ...p, cameraOn: true, cameraQuality: quality, cameraFps: fps } : p)),
+        );
+        streamKinds.current.set(stream.id, "camera");
+        track.onended = () => stopCamera();
+        void (async () => {
+          await announceKinds(null).catch(() => {});
+          await call({ action: "camera", on: true, quality, fps }).catch(() => {});
+          await broadcastMediaUpdate().catch(() => {});
+          await refreshDevices().catch(() => {});
+        })();
       } catch (e) {
         const msg = e.message || "";
         toast(msg.includes("Permission") || msg.includes("NotAllowed") ? "دسترسی به کمرا داده نشد" : msg || "کمرا روشن نشد", "error");
@@ -1015,12 +1302,34 @@ export function useMeeting(token, me) {
 
   const changeCameraQuality = useCallback(
     async (quality, fps) => {
+      const nextFps = fps ?? cameraCfgRef.current.fps;
+      cameraCfgRef.current = { quality, fps: nextFps };
       setCameraQuality(quality);
-      if (fps) setCameraFps(fps);
-      if (!cameraOn) return;
-      await startCamera(quality, fps ?? cameraFps);
+      setCameraFps(nextFps);
+      if (!cameraTrack.current) return;
+      const c = QUALITY_CONSTRAINTS[quality] ?? QUALITY_CONSTRAINTS["720p"];
+      try {
+        await cameraTrack.current.applyConstraints?.({
+          width: { ideal: c.width, max: c.width },
+          height: { ideal: c.height, max: c.height },
+          frameRate: { ideal: nextFps, max: nextFps },
+        });
+        await call({ action: "camera", on: true, quality, fps: nextFps }).catch(() => {});
+        for (const peer of peers.current.values()) {
+          if (peer.cameraTransceiver) {
+            await applyVideoSenderEncoding(peer.cameraTransceiver.sender, cameraTrack.current, {
+              quality,
+              fps: nextFps,
+              isScreen: false,
+            });
+          }
+        }
+        toast(`کیفیت کمرا به ${quality} (${nextFps}fps) تغییر کرد`, "success");
+      } catch {
+        await startCamera(quality, nextFps);
+      }
     },
-    [cameraFps, cameraOn, startCamera],
+    [call, startCamera],
   );
 
   /* ── games ── */
@@ -1050,60 +1359,93 @@ export function useMeeting(token, me) {
     [call, poll],
   );
 
-  const setVolume = useCallback((peerToken, value) => {
-    setPrefs((p) => ({ ...p, volumes: { ...p.volumes, [peerToken]: Math.min(100, Math.max(0, value)) } }));
+  const updateAudioPrefs = useCallback((patchOrFn) => {
+    const next = saveAudioPrefs(patchOrFn, hookInstanceId.current);
+    prefsRef.current = next;
+    setPrefs(next);
+    micPipelineRef.current?.updatePrefs(next);
+    return next;
   }, []);
-  const setMaster = useCallback((value) => setPrefs((p) => ({ ...p, master: Math.min(100, Math.max(0, value)) })), []);
-  const setMicGain = useCallback((value) => {
-    const level = Math.min(200, Math.max(0, value));
-    setPrefs((p) => ({ ...p, micGain: level }));
-    if (gainNode.current) gainNode.current.gain.value = level / 100;
-  }, []);
+
+  const setVolume = useCallback(
+    (peerToken, value) => {
+      updateAudioPrefs((p) => ({ ...p, volumes: { ...p.volumes, [peerToken]: Math.min(100, Math.max(0, value)) } }));
+    },
+    [updateAudioPrefs],
+  );
+  const setMaster = useCallback(
+    (value) => updateAudioPrefs({ master: Math.min(100, Math.max(0, value)) }),
+    [updateAudioPrefs],
+  );
+  const setMicGain = useCallback(
+    (value) => {
+      const level = Math.min(200, Math.max(0, value));
+      updateAudioPrefs({ micGain: level });
+    },
+    [updateAudioPrefs],
+  );
   const changeInput = useCallback(
     async (id) => {
-      setPrefs((p) => ({ ...p, inputId: id }));
-      prefsRef.current = { ...prefsRef.current, inputId: id };
+      updateAudioPrefs({ inputId: id });
       if (micTrack.current) {
         try {
           const wasOn = micOn;
           await openMic(id);
           if (micTrack.current) micTrack.current.enabled = wasOn;
           micStream.current?.getAudioTracks().forEach((t) => {
-            t.enabled = wasOn;
+            t.enabled = true;
           });
         } catch {
           toast("اتصال به این میکروفون ممکن نشد", "error");
         }
       }
     },
-    [micOn, openMic],
+    [micOn, openMic, updateAudioPrefs],
   );
-  const changeOutput = useCallback(async (id) => {
-    const probe = document.createElement("audio");
-    if (id && typeof probe.setSinkId !== "function") return toast("این مرورگر انتخاب خروجی صدا را پشتیبانی نمی‌کند", "error");
-    if (id) {
-      try {
-        await probe.setSinkId(id);
-      } catch {
-        return toast("دسترسی به این خروجی داده نشد", "error");
+  const changeOutput = useCallback(
+    async (id) => {
+      const probe = document.createElement("audio");
+      if (id && typeof probe.setSinkId !== "function") return toast("این مرورگر انتخاب خروجی صدا را پشتیبانی نمی‌کند", "error");
+      if (id) {
+        try {
+          await probe.setSinkId(id);
+        } catch {
+          return toast("دسترسی به این خروجی داده نشد", "error");
+        }
       }
-    }
-    setPrefs((p) => ({ ...p, outputId: id }));
-    prefsRef.current = { ...prefsRef.current, outputId: id };
-    for (const el of elements.current.values()) if (typeof el.setSinkId === "function") void el.setSinkId(id).catch(() => {});
-  }, []);
+      updateAudioPrefs({ outputId: id });
+      for (const el of elements.current.values()) if (typeof el.setSinkId === "function") void el.setSinkId(id).catch(() => {});
+    },
+    [updateAudioPrefs],
+  );
 
   const enableAudio = useCallback(() => {
     for (const el of elements.current.values()) void el.play().catch(() => {});
     if (audioCtx.current?.state === "suspended") void audioCtx.current.resume().catch(() => {});
   }, []);
 
+  const setLobby = useCallback(
+    async (nextLobby) => {
+      try {
+        const res = await call({ action: "set-lobby", lobby: Boolean(nextLobby) });
+        if (typeof res?.lobby === "boolean") setLobbyEnabled(res.lobby);
+        else setLobbyEnabled(Boolean(nextLobby));
+        toast(nextLobby ? "لابی تأیید میزبان فعال شد" : "ورود مستقیم فعال شد (بدون نیاز به تأیید)", "success");
+        void poll();
+      } catch (e) {
+        toast(e.message, "error");
+      }
+    },
+    [call, poll],
+  );
+
   return {
-    phase, participants, myState, amHost, joinToken, micOn, micError, speaking,
+    phase, participants, myState, amHost, lobbyEnabled, joinToken, micOn, micError, speaking,
+    myConnState,
     sharing, shareQuality, shareFps, shareError,
     cameraOn, cameraQuality, cameraFps,
     streams, localScreen, localCamera, prefs, devices, serverTimeDelta, game,
-    join, leave, previewMic, toggleMic,
+    join, leave, previewMic, toggleMic, setLobby,
     startShare, stopShare, changeShareQuality,
     startCamera, stopCamera, changeCameraQuality,
     gameCreate: (type) => gameAction("game-create", { game: type }),
@@ -1118,6 +1460,6 @@ export function useMeeting(token, me) {
       return d;
     },
     hostAction,
-    setVolume, setMaster, setMicGain, changeInput, changeOutput, enableAudio, refreshDevices,
+    setVolume, setMaster, setMicGain, updateAudioPrefs, changeInput, changeOutput, enableAudio, refreshDevices,
   };
 }

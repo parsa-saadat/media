@@ -8,14 +8,19 @@ import { useConfirm } from "../common/Confirm";
 
 function PanelHeader({ title, action }) {
   return (
-    <div className="flex items-center justify-between px-4 pb-3 pt-4">
-      <h2 className="text-xl font-black">{title}</h2>
+    <div className="flex items-center justify-between border-b border-line/60 px-3.5 pb-2.5 pt-3">
+      <h2 className="text-base font-black tracking-tight text-fg">{title}</h2>
       {action}
     </div>
   );
 }
 
 function preview(c) {
+  if (Array.isArray(c.typingUsers) && c.typingUsers.length > 0) {
+    if (c.type === "direct") return "در حال نوشتن…";
+    if (c.typingUsers.length === 1) return `${c.typingUsers[0].displayName} در حال نوشتن…`;
+    return `${c.typingUsers[0].displayName} و ${faNum(c.typingUsers.length - 1)} نفر در حال نوشتن…`;
+  }
   const l = c.lastMessage;
   if (!l) return c.description || "بدون پیام";
   if (l.type === "system") return l.content;
@@ -84,13 +89,13 @@ export function ConversationList({
               onClick={() => setPlusOpen((v) => !v)}
               aria-expanded={plusOpen}
               aria-haspopup="menu"
-              className="grad-accent glow flex h-9 w-9 items-center justify-center rounded-lg text-on-accent"
+              className="press flex h-9 w-9 items-center justify-center rounded-xl border border-accent/35 bg-accent/15 text-accent transition hover:bg-accent/25"
               aria-label="گفتگوی جدید"
             >
               <Icon name="plus" size={19} />
             </button>
             {plusOpen && (
-              <div role="menu" className="anim-surface-in absolute left-0 top-11 z-30 w-52 overflow-hidden rounded-xl border border-line bg-surface-2 p-1 shadow-2xl">
+              <div role="menu" className="popover-blur anim-surface-in absolute left-0 top-11 z-50 w-52 overflow-hidden rounded-xl border border-line p-1 shadow-2xl">
                 {onOpenSaved && (
                   <button onClick={() => { setPlusOpen(false); onOpenSaved(); }} className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm hover:bg-surface-3">
                     <Icon name="bookmark" size={16} className="text-accent" /> پیام‌های ذخیره‌شده
@@ -109,44 +114,57 @@ export function ConversationList({
           </div>
         }
       />
-      <div className="px-4">
+      <div className="px-3 pt-2.5">
         <div className="relative">
-          <span className="absolute right-3.5 top-1/2 -translate-y-1/2 text-muted">
-            <Icon name="search" size={16} />
+          <span className="absolute right-3 top-1/2 -translate-y-1/2 text-muted">
+            <Icon name="search" size={15} />
           </span>
-          <Input placeholder="جستجو در گفتگوها..." value={q} onChange={(e) => setQ(e.target.value)} className="pr-10" />
+          <Input placeholder="جستجو در گفتگوها..." value={q} onChange={(e) => setQ(e.target.value)} className="h-9 pr-9 text-xs" />
         </div>
-        <div className="scroll-thin mt-3 flex gap-1.5 overflow-x-auto pb-1">
+        <div className="scroll-thin mt-2 flex gap-1 overflow-x-auto pb-1">
           {FILTERS.map((f) => {
             const n = counts(f.id);
             return (
               <button
                 key={f.id}
                 onClick={() => setFilter(f.id)}
-                className={`flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
-                  filter === f.id ? "bg-accent text-on-accent" : "bg-surface-2 text-muted hover:text-fg"
+                className={`flex shrink-0 items-center gap-1 rounded-lg border px-2.5 py-1 text-[11px] font-bold transition ${
+                  filter === f.id
+                    ? "border-accent/45 bg-accent/16 text-accent shadow-sm"
+                    : "border-transparent bg-surface-2/80 text-muted hover:bg-surface-2 hover:text-fg"
                 }`}
               >
                 {f.label}
-                {n > 0 && <span className={`rounded-md px-1.5 text-[10px] ${filter === f.id ? "bg-white/25" : "bg-accent/20 text-accent"}`}>{faNum(n)}</span>}
+                {n > 0 && <span className={`rounded px-1 text-[9.5px] ${filter === f.id ? "bg-accent/25 text-accent" : "bg-accent/20 text-accent"}`}>{faNum(n)}</span>}
               </button>
             );
           })}
         </div>
       </div>
-      <div className="scroll-thin stagger mt-2 flex-1 overflow-y-auto px-2 pb-4">
+      <div className="scroll-thin stagger mt-1.5 flex-1 space-y-0.5 overflow-y-auto px-2 pb-3">
         {convs === null ? (
           Array.from({ length: 6 }).map((_, i) => (
-            <div key={i} className="flex items-center gap-3 p-3">
-              <div className="h-11 w-11 animate-pulse rounded-xl bg-surface-2" />
+            <div key={i} className="flex items-center gap-3 rounded-xl p-2.5">
+              <div className="shimmer-track h-11 w-11 shrink-0 rounded-xl border border-line/60 bg-surface-2/80" />
               <div className="flex-1 space-y-2">
-                <div className="h-3 w-1/2 animate-pulse rounded bg-surface-2" />
-                <div className="h-3 w-3/4 animate-pulse rounded bg-surface-2" />
+                <div className="shimmer-track h-3 w-1/2 rounded-md bg-surface-2/80" />
+                <div className="shimmer-track h-2.5 w-3/4 rounded-md bg-surface-2/65" />
               </div>
             </div>
           ))
         ) : list.length === 0 ? (
-          <Empty icon="chat" title="گفتگویی نیست" text="یک گروه بسازید یا با دوستانتان گفتگو را شروع کنید." />
+          <Empty
+            icon="chat"
+            title="هنوز گفتگویی باز نشده"
+            text="یک گروه خصوصی بسازید یا از بخش دوستان گفتگوی جدیدی را آغاز کنید."
+            action={
+              me.permissions.includes("groups.create") && (
+                <Button variant="soft" onClick={() => onCreate("group")} className="!px-3.5 !py-1.5 text-xs">
+                  <Icon name="plus" size={14} /> ساخت گروه جدید
+                </Button>
+              )
+            }
+          />
         ) : (
           list.map((c, i) => (
             <button
@@ -181,38 +199,47 @@ export function ConversationList({
                 }
                 openMenu(event, items);
               }}
-              className={`group press relative flex w-full items-center gap-3 rounded-xl p-2.5 text-right ${
-                activeId === c.id ? "bg-accent/15" : "hover:bg-surface-2"
+              className={`no-glass-btn group press relative flex w-full items-center gap-2.5 rounded-xl border p-2 text-right transition ${
+                activeId === c.id
+                  ? "border-accent/35 bg-accent/14 shadow-sm"
+                  : "border-transparent hover:border-line/70 hover:bg-surface-2/85"
               }`}
             >
-              {activeId === c.id && <span className="grad-accent absolute right-0 top-2.5 bottom-2.5 w-1 rounded-full" />}
+              {activeId === c.id && <span className="grad-accent absolute right-0 top-2 bottom-2 w-1 rounded-full" />}
               {c.type === "saved" ? (
-                <span className="grad-accent flex h-[46px] w-[46px] shrink-0 items-center justify-center rounded-lg text-on-accent shadow-sm">
-                  <Icon name="bookmark" size={20} />
+                <span className="grad-accent flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-on-accent shadow-sm">
+                  <Icon name="bookmark" size={18} />
                 </span>
               ) : c.type === "direct" ? (
-                <Avatar name={c.name} color={c.peer?.avatarColor} lastSeenAt={c.peer?.lastSeenAt} size={46} userId={c.peer?.id} avatarFileId={c.peer?.avatarFileId} />
+                <Avatar name={c.name} color={c.peer?.avatarColor} status={c.peer?.status} lastSeenAt={c.peer?.lastSeenAt} size={40} userId={c.peer?.id} avatarFileId={c.peer?.avatarFileId} />
               ) : (
-                <Avatar name={c.name} emoji={c.emoji} size={46} />
+                <Avatar name={c.name} emoji={c.emoji} size={40} />
               )}
               <div className="min-w-0 flex-1">
-                <p className="flex min-w-0 items-center gap-1.5 text-sm font-bold">
-                  {c.type === "saved" && <Icon name="bookmark" size={13} className="shrink-0 text-accent" />}
-                  {c.type === "room" && <Icon name="hash" size={13} className="shrink-0 text-accent" />}
-                  {c.type === "group" && <Icon name="lock" size={12} className="shrink-0 text-muted" />}
+                <p className="flex min-w-0 items-center gap-1 text-[13px] font-bold text-fg">
+                  {c.type === "saved" && <Icon name="bookmark" size={12} className="shrink-0 text-accent" />}
+                  {c.type === "room" && <Icon name="hash" size={12} className="shrink-0 text-accent" />}
+                  {c.type === "group" && <Icon name="lock" size={11} className="shrink-0 text-muted" />}
                   <span className="truncate">{c.name}</span>
                 </p>
-                <p className="mt-0.5 truncate text-xs text-muted" dir="auto">
+                <p
+                  className={`mt-0.5 truncate text-[11.5px] ${
+                    Array.isArray(c.typingUsers) && c.typingUsers.length > 0
+                      ? "font-bold text-accent"
+                      : "text-muted"
+                  }`}
+                  dir="auto"
+                >
                   {preview(c)}
                 </p>
               </div>
-              <div className="flex w-12 shrink-0 flex-col items-end justify-between self-stretch py-0.5">
-                <span className={`text-[10px] tabular-nums ${c.unread ? "text-accent" : "text-muted"}`}>
+              <div className="flex w-11 shrink-0 flex-col items-end justify-between self-stretch py-0.5">
+                <span className={`text-[9.5px] tabular-nums ${c.unread ? "font-bold text-accent" : "text-muted"}`}>
                   {c.lastMessage ? shortTime(c.lastMessage.createdAt) : ""}
                 </span>
                 <span
                   key={c.unread > 0 ? `b-${c.unread}` : "b-0"}
-                  className={`flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[10px] font-bold transition-opacity ${
+                  className={`flex h-[18px] min-w-[18px] items-center justify-center rounded-full px-1 text-[9.5px] font-black transition-opacity ${
                     c.unread > 0 ? "grad-accent anim-badge text-on-accent opacity-100" : "opacity-0"
                   }`}
                   aria-hidden={c.unread === 0}
@@ -237,7 +264,7 @@ export function MeetingsPanel({ me, onOpenMeeting }) {
   const [creating, setCreating] = useState(false);
   const [title, setTitle] = useState("");
   const roleHours = typeof me.maxMeetingHours === "number" ? me.maxMeetingHours : 24;
-  const [lobby, setLobby] = useState(true);
+  const [lobby, setLobby] = useState(false);
   const [busy, setBusy] = useState(false);
   const canCreate = me.permissions.includes("meetings.create");
   const defaultMeetingTitle = `جلسهٔ ${me.displayName}`;
@@ -314,64 +341,93 @@ export function MeetingsPanel({ me, onOpenMeeting }) {
       />
 
       {creating && (
-        <div className="anim-rise mx-3 mb-3 space-y-3 rounded-xl border border-accent/25 bg-accent/10 p-4">
-          <Field label="عنوان جلسه (اختیاری)" hint={`در صورت خالی گذاشتن: «${defaultMeetingTitle}»`}>
-            <Input
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              maxLength={60}
-              placeholder={defaultMeetingTitle}
-              onKeyDown={(e) => { if (e.key === "Enter" && !busy) void create(); }}
-            />
-          </Field>
-          <label className="flex cursor-pointer items-start gap-2.5 rounded-lg border border-line bg-surface/60 p-2.5 text-xs">
-            <input type="checkbox" checked={lobby} onChange={(e) => setLobby(e.target.checked)} className="mt-0.5 h-4 w-4 accent-[var(--accent)]" />
-            <span>
-              <span className="block font-bold">ورود با تأیید میزبان</span>
-              <span className="block text-muted">افراد در لابی منتظر می‌مانند تا شما راهشان بدهید.</span>
+        <div className="anim-rise mx-3 mt-2 mb-2 space-y-2.5 rounded-2xl border border-accent/30 bg-surface/75 p-3.5 shadow-lg backdrop-blur-xl">
+          <div className="flex items-center justify-between text-[11px] font-bold text-muted">
+            <span className="flex items-center gap-1.5 text-fg">
+              <Icon name="radio" size={14} className="text-accent" />
+              ساخت اتاق میت
             </span>
-          </label>
-          <Button onClick={() => void create()} disabled={busy} className="w-full">
-            {busy ? "در حال ساخت…" : "ساخت جلسه و ورود"}
-          </Button>
-          <p className="text-[11px] leading-5 text-muted">
-            {roleHours === 0
-              ? "مهمان‌ها با لینک و بدون ثبت‌نام وارد می‌شوند · مدت ماندگاری میت بر اساس نقش شما نامحدود است."
-              : `مهمان‌ها با لینک و بدون ثبت‌نام وارد می‌شوند · این میت بر اساس نقش شما تا ${faNum(roleHours)} ساعت فعال می‌ماند.`}
-          </p>
+            <span className="rounded-md border border-line bg-surface-2/80 px-2 py-0.5 text-[10px] text-accent">
+              {roleHours === 0 ? "نامحدود" : `${faNum(roleHours)} ساعت`}
+            </span>
+          </div>
+          <Input
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            maxLength={60}
+            placeholder={`عنوان جلسه (${defaultMeetingTitle})`}
+            onKeyDown={(e) => { if (e.key === "Enter" && !busy) void create(); }}
+            className="h-9 text-xs"
+          />
+          <div className="flex items-center justify-between gap-2">
+            <label className="flex cursor-pointer items-center gap-2 rounded-xl border border-line bg-surface-2/70 px-2.5 py-2 text-xs font-bold text-fg transition hover:border-accent/40">
+              <input type="checkbox" checked={lobby} onChange={(e) => setLobby(e.target.checked)} />
+              <span>لابی تأیید میزبان</span>
+            </label>
+            <Button onClick={() => void create()} disabled={busy} className="flex-1 !py-2 text-xs">
+              <Icon name="video" size={15} />
+              {busy ? "در حال ساخت…" : "ساخت و ورود"}
+            </Button>
+          </div>
         </div>
       )}
 
-      <div className="scroll-thin stagger min-h-0 flex-1 space-y-2 overflow-y-auto px-3 pb-4">
+      <div className="scroll-thin stagger mt-2.5 min-h-0 flex-1 space-y-2 overflow-y-auto px-3 pb-4">
         {items === null ? (
           <p className="p-6 text-center text-sm text-muted">در حال بارگذاری…</p>
         ) : items.length === 0 ? (
-          <Empty icon="radio" title="جلسه‌ای ندارید" text="یک جلسه بسازید و لینک آن را برای دیگران بفرستید؛ ورود با لینک ممکن است و ثبت‌نام لازم نیست." />
+          <Empty
+            icon="radio"
+            title="هیچ میت فعالی ندارید"
+            text="یک اتاق جلسه بسازید و لینک آن را برای هر کسی بفرستید — حتی بدون ثبت‌نام."
+            action={
+              canCreate && !creating && (
+                <Button variant="soft" onClick={() => setCreating(true)} className="!px-3.5 !py-1.5 text-xs">
+                  <Icon name="plus" size={14} /> ساخت اولین جلسه
+                </Button>
+              )
+            }
+          />
         ) : (
           items.map((m, i) => (
-            <div key={m.id} style={{ ["--i"]: Math.min(i, 10) }} className="lift rounded-xl border border-line bg-surface-2/60 p-3.5 hover:bg-surface-2">
+            <div key={m.id} style={{ ["--i"]: Math.min(i, 10) }} className="lift rounded-2xl border border-line bg-surface/72 p-3.5 backdrop-blur-xl hover:bg-surface-2/85">
               <div className="flex items-center gap-3">
-                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-accent/15 text-accent"><Icon name="radio" size={20} /></span>
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-accent/30 bg-accent/15 text-accent"><Icon name="radio" size={19} /></span>
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-bold">{m.title}</p>
-                  <p className="flex flex-wrap items-center gap-2 text-[11px] text-muted">
-                    <span className="flex items-center gap-1"><Icon name="users" size={11} /> {faNum(m.inside)} داخل</span>
+                  <p className="mt-0.5 flex flex-wrap items-center gap-2 text-[11px] text-muted">
+                    <span className="flex items-center gap-1"><Icon name="users" size={11} /> {faNum(m.inside)} آنلاین</span>
                     {m.lobby && <span className="flex items-center gap-1 text-amber-400"><Icon name="clock" size={11} /> لابی</span>}
-                    {m.expiresAt ? (
-                      <span className="rounded bg-surface-3 px-1.5 py-0.5 text-[10px]">
-                        تا {faNum(Math.max(1, Math.ceil((new Date(m.expiresAt).getTime() - Date.now()) / 3_600_000)))} ساعت دیگر
-                      </span>
-                    ) : (
-                      <span className="rounded bg-surface-3 px-1.5 py-0.5 text-[10px]">نامحدود</span>
-                    )}
-                    <span>{shortTime(m.createdAt)}</span>
+                    <span className="rounded-md bg-surface-3/80 px-1.5 py-0.5 text-[10px]">
+                      {m.expiresAt ? `${faNum(Math.max(1, Math.ceil((new Date(m.expiresAt).getTime() - Date.now()) / 3_600_000)))} ساعت` : "نامحدود"}
+                    </span>
                   </p>
                 </div>
               </div>
-              <div className="mt-3 flex flex-wrap gap-2">
-                <Button variant="primary" onClick={() => onOpenMeeting(m.token)} className="!px-3 !py-1.5 text-xs"><Icon name="phone" size={14} /> ورود</Button>
-                <Button variant="ghost" onClick={() => void copyLink(m.token)} className="!px-3 !py-1.5 text-xs"><Icon name="link" size={14} /> کپی لینک</Button>
-                <Button variant="danger" onClick={() => void remove(m)} className="!px-3 !py-1.5 text-xs"><Icon name="phone-off" size={14} /> پایان</Button>
+              <div className="mt-3 flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => onOpenMeeting(m.token)}
+                  className="press flex flex-1 items-center justify-center gap-1.5 rounded-xl border border-accent/45 bg-accent/20 py-2 text-xs font-black text-accent backdrop-blur-md transition hover:border-accent hover:bg-accent/30"
+                >
+                  <Icon name="video" size={14} /> ورود به میت
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void copyLink(m.token)}
+                  title="کپی لینک دعوت"
+                  className="press flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-line bg-surface-2/80 text-muted backdrop-blur-md transition hover:border-accent/40 hover:text-accent"
+                >
+                  <Icon name="link" size={15} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void remove(m)}
+                  title="پایان میت برای همه"
+                  className="press flex items-center gap-1 rounded-xl border border-rose-400/35 bg-rose-500/15 px-3 py-2 text-xs font-bold text-rose-300 backdrop-blur-md transition hover:border-rose-400 hover:bg-rose-500/25"
+                >
+                  <Icon name="phone-off" size={14} /> پایان
+                </button>
               </div>
             </div>
           ))
@@ -409,10 +465,12 @@ export function GroupsPanel({ me, onOpen, onCreate }) {
           <Button variant="soft" onClick={onCreate} className="!px-3 !py-2 text-xs"><Icon name="plus" size={14} /> گروه جدید</Button>
         )}
       />
-      <div className="px-4">
+      <div className="px-3 pt-2.5">
         <div className="relative">
-          <span className="absolute right-3.5 top-1/2 -translate-y-1/2 text-muted"><Icon name="search" size={16} /></span>
-          <Input placeholder="جستجو در گروه‌های خودم…" value={q} onChange={(e) => setQ(e.target.value)} className="pr-10" />
+          <span className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 text-muted">
+            <Icon name="search" size={16} />
+          </span>
+          <Input placeholder="جستجو در گروه‌های خودم…" value={q} onChange={(e) => setQ(e.target.value)} className="h-10 pr-10 text-xs" />
         </div>
         <p className="mt-2 flex items-center gap-1.5 text-[11px] text-muted"><Icon name="lock" size={12} /> گروه‌ها خصوصی‌اند؛ فقط اعضای هر گروه آن را می‌بینند.</p>
       </div>
@@ -420,7 +478,18 @@ export function GroupsPanel({ me, onOpen, onCreate }) {
         {groups === null ? (
           <p className="p-6 text-center text-sm text-muted">در حال بارگذاری…</p>
         ) : groups.length === 0 ? (
-          <Empty icon="users" title="گروهی پیدا نشد" text={q ? "با این عبارت گروهی در فهرست شما نیست." : "اولین گروه خود را بسازید و دوستانتان را دعوت کنید."} />
+          <Empty
+            icon="users"
+            title={q ? "گروهی با این نام پیدا نشد" : "هنوز عضو گروهی نیستید"}
+            text={q ? "عبارت دیگری را امتحان کنید." : "اولین گروه خصوصی خود را بسازید و دوستانتان را اضافه کنید."}
+            action={
+              !q && me.permissions.includes("groups.create") && (
+                <Button variant="soft" onClick={onCreate} className="!px-3.5 !py-1.5 text-xs">
+                  <Icon name="plus" size={14} /> ساخت گروه خصوصی
+                </Button>
+              )
+            }
+          />
         ) : (
           groups.map((g, i) => (
             <button key={g.id} style={{ ["--i"]: Math.min(i, 10) }} onClick={() => onOpen(g.id)} className="press flex w-full items-center gap-3 rounded-xl border border-line bg-surface-2/60 p-3.5 text-right hover:bg-surface-2">
@@ -560,7 +629,7 @@ export function FriendsPanel({ data, reload, onMessage, onProfile, me }) {
       <PanelHeader title="دوستان" />
 
       {/* Redesigned Add Friend Card — harmonious with inebuly theme & left-pointing arrow */}
-      <div className="px-3">
+      <div className="px-3 pt-2.5">
         <div className="relative overflow-hidden rounded-xl border border-line bg-gradient-to-br from-accent/12 via-surface-2/80 to-surface-2 p-3.5 shadow-sm">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
@@ -599,7 +668,7 @@ export function FriendsPanel({ data, reload, onMessage, onProfile, me }) {
                     else if (username.trim()) void send(username);
                   }
                 }}
-                className="ring-glow h-10 w-full rounded-lg border border-line bg-surface/90 pl-7 pr-8 text-left text-xs font-semibold text-fg placeholder:text-muted/60"
+                className="ring-glow h-10 w-full rounded-lg border border-line bg-surface/90 pl-7 pr-8 text-left text-xs font-semibold text-fg"
               />
               {username && (
                 <button
@@ -617,13 +686,13 @@ export function FriendsPanel({ data, reload, onMessage, onProfile, me }) {
               onClick={() => void send()}
               disabled={busy || !canRequest || !username.trim()}
               title="ارسال درخواست دوستی"
-              className="grad-accent glow press flex h-10 shrink-0 items-center gap-1.5 rounded-lg px-3.5 text-xs font-bold text-on-accent disabled:cursor-not-allowed disabled:opacity-45 disabled:shadow-none"
+              className="press flex h-10 shrink-0 items-center gap-1.5 rounded-xl border border-accent/50 bg-accent/22 px-3.5 text-xs font-black text-accent backdrop-blur-md transition hover:border-accent hover:bg-accent/32 disabled:cursor-not-allowed disabled:border-line disabled:bg-surface-3/85 disabled:text-muted disabled:opacity-75"
             >
               <span>افزودن</span>
               {busy ? (
-                <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+                <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-accent/40 border-t-accent" />
               ) : (
-                <Icon name="arrow-left" size={15} />
+                <Icon name="user-plus" size={15} />
               )}
             </button>
           </div>
@@ -665,9 +734,9 @@ export function FriendsPanel({ data, reload, onMessage, onProfile, me }) {
                           type="button"
                           onClick={() => void send(u.username)}
                           disabled={busy || !canRequest}
-                          className="press flex items-center gap-1 rounded-md bg-accent/15 px-2.5 py-1.5 text-[11px] font-bold text-accent hover:bg-accent/25 disabled:opacity-50"
+                          className="press flex items-center gap-1 rounded-xl border border-accent/40 bg-accent/16 px-2.5 py-1.5 text-[11px] font-bold text-accent backdrop-blur-md hover:bg-accent/26 disabled:opacity-50"
                         >
-                          درخواست <Icon name="arrow-left" size={12} />
+                          <Icon name="user-plus" size={13} /> درخواست
                         </button>
                       )}
                     </div>
@@ -678,11 +747,19 @@ export function FriendsPanel({ data, reload, onMessage, onProfile, me }) {
           )}
         </div>
 
-        <div className="mt-3 grid grid-cols-3 gap-1 rounded-lg bg-surface-2 p-1">
+        <div className="mt-3 grid grid-cols-3 gap-1 rounded-xl border border-line bg-surface-2/80 p-1">
           {tabs.map((t) => (
-            <button key={t.id} type="button" onClick={() => setTab(t.id)} aria-pressed={tab === t.id} className={`relative rounded-md py-2 text-[11px] font-bold transition ${tab === t.id ? "bg-surface-3 text-fg" : "text-muted hover:text-fg"}`}>
-              {t.label}
-              {t.count > 0 && <span className={`ms-1 rounded-md px-1.5 text-[10px] ${tab === t.id ? "bg-accent/25 text-accent" : "bg-surface-3 text-muted"}`}>{faNum(t.count)}</span>}
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => setTab(t.id)}
+              aria-pressed={tab === t.id}
+              className={`no-glass-btn relative flex min-w-0 items-center justify-center gap-1 rounded-lg border px-1.5 py-1.5 text-[11px] font-bold whitespace-nowrap transition ${
+                tab === t.id ? "border-accent/40 bg-accent/15 text-accent" : "border-transparent text-muted hover:text-fg"
+              }`}
+            >
+              <span className="truncate">{t.label}</span>
+              {t.count > 0 && <span className={`shrink-0 rounded-md px-1 text-[9.5px] ${tab === t.id ? "bg-accent/25 text-accent" : "bg-surface-3 text-muted"}`}>{faNum(t.count)}</span>}
             </button>
           ))}
         </div>

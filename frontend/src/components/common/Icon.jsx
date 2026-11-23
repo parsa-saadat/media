@@ -64,7 +64,24 @@ const P = {
       <path d="M9 9.5h.01M15 9.5h.01" />
     </>
   ),
-  send: <path d="M3.3 20.5 20.9 12.9a.95.95 0 0 0 0-1.76L3.3 3.5a.9.9 0 0 0-1.24 1.04L3.9 11l8.1 1-8.1 1-1.84 6.46A.9.9 0 0 0 3.3 20.5z" fill="currentColor" stroke="none" />,
+  send: (
+    <>
+      <path d="M21 3 10 14" />
+      <path d="m21 3-6.5 18a.55.55 0 0 1-1 0L10 14l-7-3.5a.55.55 0 0 1 0-1L21 3Z" />
+    </>
+  ),
+  "alert-circle": (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 8v4.5M12 16h.01" />
+    </>
+  ),
+  "app-install": (
+    <>
+      <rect x="5" y="2.5" width="14" height="19" rx="2.5" />
+      <path d="M12 7.5v6M9.5 11L12 13.5 14.5 11M9 18h6" />
+    </>
+  ),
   close: <path d="M6 6l12 12M18 6L6 18" />,
   plus: <path d="M12 5v14M5 12h14" />,
   search: (
@@ -307,6 +324,18 @@ const P = {
       <rect x="2.5" y="4.5" width="14" height="10.5" rx="2" />
       <path d="M6.5 18.5h6M9.5 15v3.5" />
       <rect x="15" y="9.5" width="6.5" height="10.5" rx="1.5" />
+    </>
+  ),
+  forward: (
+    <>
+      <path d="M14 5l6 6-6 6" />
+      <path d="M4 19v-2a6 6 0 0 1 6-6h10" />
+    </>
+  ),
+  move: (
+    <>
+      <path d="M12 2v20M2 12h20" />
+      <path d="M9 5l3-3 3 3M9 19l3 3 3-3M5 9l-3 3 3 3M19 9l3 3-3 3" />
     </>
   ),
 };

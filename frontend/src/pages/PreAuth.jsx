@@ -6,6 +6,8 @@ import { navigate } from "../utils/router";
 import { useSession } from "../utils/session";
 import { isValidPhone, normalizePhone, toEnglishDigits } from "../utils/validators/phone.validator";
 import { isValidUsername, normalizeUsername } from "../utils/validators/username.validator";
+import { usePwaInstall } from "../hooks/usePwaInstall";
+import { toast } from "../utils/client";
 
 const FEATURES = [
   { icon: "radio", title: "جلسه‌های صوتی و تصویری پایدار", desc: "ورود فوری با لینک، اشتراک صفحهٔ هم‌زمان و کمرا با کیفیت ۱۰۸۰p" },
@@ -28,6 +30,7 @@ export default function PreAuth({ mode }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [daily, setDaily] = useState(null);
+  const { canInstall, isIos, promptInstall } = usePwaInstall();
 
   useEffect(() => {
     apiFetch("/api/content/daily")
@@ -127,12 +130,14 @@ export default function PreAuth({ mode }) {
   const passStrength = password.length === 0 ? 0 : password.length < 6 ? 1 : password.length < 10 ? 2 : 3;
 
   return (
-    <div className="bg-aurora relative flex min-h-[100dvh] flex-col justify-center overflow-x-hidden overflow-y-auto px-4 py-6 sm:px-6 lg:px-10">
-      {/* Ambient glows */}
-      <div className="pointer-events-none fixed -left-28 -top-28 h-80 w-80 rounded-full bg-accent/20 blur-3xl" />
-      <div className="pointer-events-none fixed -bottom-32 -right-24 h-96 w-96 rounded-full bg-accent-2/15 blur-3xl" />
+    <div className="bg-aurora relative flex h-[100dvh] flex-col overflow-hidden">
+      <div className="scroll-thin flex-1 overflow-x-hidden overflow-y-auto px-4 py-6 sm:px-6 lg:px-10">
+        {/* Ambient glows */}
+        <div className="pointer-events-none fixed -left-28 -top-28 h-80 w-80 rounded-full bg-accent/20 blur-3xl" />
+        <div className="pointer-events-none fixed -bottom-32 -right-24 h-96 w-96 rounded-full bg-accent-2/15 blur-3xl" />
 
-      <div className="relative z-10 mx-auto grid w-full max-w-5xl grid-cols-1 items-center gap-6 lg:grid-cols-[1.08fr_1fr] lg:gap-10">
+        <div className="relative z-10 mx-auto flex min-h-full w-full max-w-5xl items-center">
+          <div className="grid w-full grid-cols-1 items-center gap-6 lg:grid-cols-[1.08fr_1fr] lg:gap-10">
         {/* Right / Desktop showcase column */}
         <section className="order-2 flex flex-col gap-5 lg:order-1">
           <div className="hidden lg:flex lg:flex-col lg:gap-4">
@@ -429,8 +434,27 @@ export default function PreAuth({ mode }) {
                 {isLogin ? "همین حالا ثبت‌نام کنید" : "وارد شوید"}
               </button>
             </div>
+
+            {canInstall && (
+              <button
+                type="button"
+                onClick={() =>
+                  void promptInstall().then((r) => {
+                    if (r.outcome === "accepted") toast("نصب برنامه آغاز شد", "success");
+                    else if (r.outcome === "ios-manual")
+                      toast("در Safari روی دکمهٔ Share و سپس Add to Home Screen بزنید", "info");
+                  })
+                }
+                className="press mt-3 flex w-full items-center justify-center gap-2 rounded-xl border border-accent/30 bg-accent/10 py-2.5 text-xs font-bold text-accent transition hover:bg-accent/18"
+              >
+                <Icon name="app-install" size={16} />
+                <span>{isIos ? "راهنمای نصب وب‌اپلیکیشن روی آیفون" : "نصب مستقیم وب‌اپلیکیشن inebuly"}</span>
+              </button>
+            )}
           </div>
         </main>
+          </div>
+        </div>
       </div>
     </div>
   );

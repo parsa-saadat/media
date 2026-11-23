@@ -89,6 +89,7 @@ export async function createMeeting(me, input) {
     title: finalTitle,
     hostId: me.id,
     lobby: input.lobby,
+    invitedUserIds: [],
     allowNames: input.allowNames,
     durationHours: roleHours,
     expiresAt,
@@ -214,15 +215,18 @@ export async function joinMeeting(me, meeting, input) {
   const joinToken = existing?.joinToken ?? newJoinToken();
   const afterEvictLive = await findParticipants({ meetingId: meeting._id, lastSeenAt: alive() });
   const usedNames = new Set(afterEvictLive.map((p) => p.name));
+  const invitedSet = new Set(Array.isArray(meeting.invitedUserIds) ? meeting.invitedUserIds : []);
+  const isBypassedFromLobby = isHost(meeting, me) || (!!me && invitedSet.has(me.id));
 
   if (existing) {
-    // Preserve existing participant's lobby status (don't auto-admit someone who refreshed while waiting in lobby!)
-    const keepLobby = existing.inLobby && !isHost(meeting, me);
+    // Preserve existing participant's lobby status unless they are host or were invited by host!
+    const keepLobby = existing.inLobby && !isBypassedFromLobby && Boolean(meeting.lobby);
     // Clear stale signals addressed to/from this participant so peers cleanly renegotiate if needed
     await deleteMeetingSignals({ meetingId: meeting._id, $or: [{ from: joinToken }, { to: joinToken }] });
     await upsertParticipant(meeting._id, joinToken, {
       inLobby: keepLobby,
       micOn: false,
+      connState: "connecting",
       sharingOn: false,
       cameraOn: false,
       ...(input.browserId ? { browserId: input.browserId } : {}),
@@ -249,9 +253,10 @@ export async function joinMeeting(me, meeting, input) {
       userId: me?.id ?? null,
       browserId: input.browserId || null,
       isGuest: !me,
-      // The host never waits in their own lobby.
-      inLobby: meeting.lobby && !isHost(meeting, me),
+      // Neither the host nor anyone explicitly invited by the host ever waits in the lobby!
+      inLobby: Boolean(meeting.lobby) && !isBypassedFromLobby,
       micOn: false,
+      connState: "connecting",
       sharingOn: false,
       shareQuality: "720p",
       shareFps: 30,
@@ -306,6 +311,7 @@ async function snapshot(meeting, joinToken, after = 0, afterAudio = 0) {
       isGuest: p.isGuest,
       inLobby: p.inLobby,
       micOn: p.micOn,
+      connState: p.connState ?? "connecting",
       sharingOn: p.sharingOn,
       shareQuality: p.shareQuality,
       shareFps: p.shareFps ?? 30,
@@ -333,6 +339,7 @@ async function snapshot(meeting, joinToken, after = 0, afterAudio = 0) {
     audioCursor,
     game: games.publicGame(await games.activeGame(meeting._id)),
     host: mine.userId !== null && mine.userId === meeting.hostId,
+    lobby: Boolean(meeting.lobby),
     expiresAt: meeting.expiresAt ?? null,
     myState: {
       inLobby: mine.inLobby,
@@ -393,6 +400,10 @@ export async function meetingAction(me, meeting, input) {
     await updateParticipant({ _id: key }, { micOn: input.on });
     return;
   }
+  if (input.action === "conn-state") {
+    await updateParticipant({ _id: key }, { connState: input.state });
+    return;
+  }
   if (input.action === "share") {
     if (input.on) {
       if (actor.shareBlocked) throw new HttpError(403, "میزبان اشتراک صفحهٔ شما را بسته است");
@@ -444,6 +455,19 @@ export async function meetingAction(me, meeting, input) {
 
   // host-only actions
   await requireHost(meeting, input.joinToken);
+  if (input.action === "set-lobby") {
+    await updateOneMeeting({ _id: meeting._id }, { lobby: input.lobby });
+    meeting.lobby = input.lobby;
+    // If lobby was turned OFF, admit anyone currently waiting in the lobby immediately!
+    if (!input.lobby) {
+      const waiters = await findParticipants({ meetingId: meeting._id, inLobby: true, lastSeenAt: alive() });
+      for (const w of waiters) {
+        await updateParticipant({ _id: w._id }, { inLobby: false });
+      }
+    }
+    return { lobby: input.lobby };
+  }
+
   const targetKey = participantKey(meeting._id, input.target);
   const target = await findOneParticipant({ _id: targetKey, lastSeenAt: alive() });
   if (!target) throw new HttpError(404, "این فرد در جلسه نیست");
@@ -505,28 +529,39 @@ export async function inviteToMeeting(me, meeting, userIds) {
   const friends = await listFriends(me);
   const allowed = new Map(friends.friends.map((f) => [f.user.id, f.user]));
   const invited = [];
+  const invitedIds = new Set(Array.isArray(meeting.invitedUserIds) ? meeting.invitedUserIds : []);
+
   for (const id of userIds.slice(0, 25)) {
     const friend = allowed.get(id);
     if (!friend) throw new HttpError(403, "فقط دوستانتان را می‌توانید دعوت کنید");
+    invitedIds.add(id);
+
+    // If this friend is already waiting in the lobby right now, auto-admit them immediately!
+    const waitingRow = (await findParticipants({ meetingId: meeting._id, userId: id, inLobby: true, lastSeenAt: alive() }))[0];
+    if (waitingRow) {
+      await updateParticipant({ _id: waitingRow._id }, { inLobby: false });
+    }
+
     const chat = await getOrCreateDirect(me.id, id);
     await insertMessage({
       conversationId: chat._id,
       senderId: me.id,
       type: "meeting",
-      content: JSON.stringify({ token: meeting.token, title: meeting.title, host: me.displayName, lobby: meeting.lobby, at: Date.now() }),
+      content: JSON.stringify({ token: meeting.token, title: meeting.title, host: me.displayName, lobby: false, invited: true, at: Date.now() }),
       fileId: null,
     });
     await touchChat(chat._id);
     await insertNotification({
       userId: id,
       kind: "meeting-invite",
-      title: "دعوت به جلسه",
-      body: `${me.displayName} شما را به «${meeting.title}» دعوت کرد`,
+      title: "دعوت مستقیم به جلسه",
+      body: `${me.displayName} شما را به «${meeting.title}» دعوت کرد (ورود مستقیم بدون انتظار)`,
       path: `/meet/${meeting.token}`,
       actorName: me.displayName,
     });
     invited.push(friend.displayName);
   }
+  await updateOneMeeting({ _id: meeting._id }, { invitedUserIds: [...invitedIds] });
   return { invited };
 }
 

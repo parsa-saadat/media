@@ -14,15 +14,106 @@ import {
 import { Avatar, Button, Input, Modal } from "../common/Ui";
 import { Icon } from "../common/Icon";
 import VoicePanel from "../voice/VoicePanel";
-import AuthedImage from "../common/AuthedImage";
+import AuthedImage, { rememberBlob } from "../common/AuthedImage";
 import EmojiPicker from "./EmojiPicker";
 import { StatusLine } from "../common/StatusDot";
 import { playSound } from "../../utils/sounds";
 import { navigate } from "../../utils/router";
 import { ContextMenu, useContextMenu } from "../common/ContextMenu";
 import { useConfirm } from "../common/Confirm";
+import ChatWallpaperBackdrop from "./ChatWallpaperBackdrop";
+import Gallery from "./Gallery";
+import { buildMicConstraints, createMicAudioPipeline, readAudioPrefs } from "../../utils/audioPrefs";
 
 const ROLE_LABEL = { owner: "مالک", admin: "مدیر", member: "عضو" };
+
+const URL_TOKEN_RE = /(https?:\/\/[^\s<>"']+)/gi;
+const TRAILING_PUNCT_RE = /[),.!?:;،؛»\]}]+$/;
+
+/** Safely decode percent-encoded Persian/Unicode URLs for clean human-readable display. */
+function formatDisplayUrl(rawHref) {
+  let decoded = rawHref;
+  try {
+    decoded = decodeURI(rawHref);
+  } catch {
+    try {
+      decoded = decodeURIComponent(rawHref);
+    } catch {
+      decoded = rawHref;
+    }
+  }
+  // Strip protocol + trailing slash so links like `https://parsigeo.ir/product/.../` look crisp
+  let clean = decoded.replace(/^https?:\/\/(www\.)?/i, "");
+  if (clean.endsWith("/") && clean.indexOf("/") !== clean.length - 1) {
+    clean = clean.slice(0, -1);
+  }
+  if (clean.length > 76) {
+    clean = clean.slice(0, 46) + "…" + clean.slice(-24);
+  }
+  return clean;
+}
+
+/** Splits message text into plain segments and smart clickable links with decoded Persian labels. */
+function RichMessageText({ text, mine }) {
+  if (!text) return null;
+  const parts = [];
+  let lastIdx = 0;
+  URL_TOKEN_RE.lastIndex = 0;
+  let match;
+  while ((match = URL_TOKEN_RE.exec(text)) !== null) {
+    const start = match.index;
+    let rawUrl = match[0];
+    let trailing = "";
+    const trailMatch = rawUrl.match(TRAILING_PUNCT_RE);
+    if (trailMatch) {
+      trailing = trailMatch[0];
+      rawUrl = rawUrl.slice(0, -trailing.length);
+    }
+    if (start > lastIdx) {
+      parts.push({ kind: "text", value: text.slice(lastIdx, start) });
+    }
+    parts.push({
+      kind: "link",
+      href: rawUrl,
+      label: formatDisplayUrl(rawUrl),
+    });
+    if (trailing) {
+      parts.push({ kind: "text", value: trailing });
+    }
+    lastIdx = start + match[0].length;
+  }
+  if (lastIdx < text.length) {
+    parts.push({ kind: "text", value: text.slice(lastIdx) });
+  }
+
+  return (
+    <>
+      {parts.map((part, idx) =>
+        part.kind === "link" ? (
+          <a
+            key={idx}
+            href={part.href}
+            target="_blank"
+            rel="noopener noreferrer"
+            dir="auto"
+            onClick={(e) => e.stopPropagation()}
+            title={part.href}
+            className={`inline-flex max-w-full items-center gap-1 rounded-md px-1.5 py-0.5 align-baseline text-[13px] font-semibold underline decoration-1 underline-offset-4 transition break-all ${
+              mine
+                ? "bg-accent/18 text-accent decoration-accent/55 hover:bg-accent/28"
+                : "bg-accent/12 text-accent decoration-accent/50 hover:bg-accent/20"
+            }`}
+          >
+            <Icon name="globe" size={12} className="shrink-0 opacity-85" />
+            <span className="truncate">{part.label}</span>
+          </a>
+        ) : (
+          <span key={idx}>{part.value}</span>
+        ),
+      )}
+    </>
+  );
+}
 
 function fileIcon(mime, name) {
   const n = (name || "").toLowerCase();
@@ -39,6 +130,7 @@ function fileIcon(mime, name) {
 export default function ChatView({
   conversationId,
   me,
+  convs,
   friends,
   onBack,
   onChanged,
@@ -62,21 +154,40 @@ export default function ChatView({
   const [addModalOpen, setAddModalOpen] = useState(false);
   const [pickedMembers, setPickedMembers] = useState([]);
   const [addingBatch, setAddingBatch] = useState(false);
-  /** multi-select mode: pick several messages and delete them together */
+  /** multi-select mode: pick several messages and delete/forward them together */
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState(new Set());
   const [editing, setEditing] = useState(null);
+  const [showJumpDown, setShowJumpDown] = useState(false);
+  /** Forward modal state: array of message IDs to forward, destination search & picked target IDs */
+  const [forwardModalIds, setForwardModalIds] = useState([]);
+  const [forwardTargets, setForwardTargets] = useState([]);
+  const [forwardIncludeSaved, setForwardIncludeSaved] = useState(false);
+  const [forwardSearch, setForwardSearch] = useState("");
+  const [forwardingBusy, setForwardingBusy] = useState(false);
+  const [localConvs, setLocalConvs] = useState([]);
+  const [peerProfile, setPeerProfile] = useState(null);
+  const [peerRelation, setPeerRelation] = useState("none");
+  const [peerFriendId, setPeerFriendId] = useState(null);
+  const [peerGalleryIdx, setPeerGalleryIdx] = useState(null);
+  /** Optimistic outgoing queue: `Array<{ tempId, type, content, createdAt, status: 'sending'|'failed', errorText?, files?: File[], localUrls?: string[], voiceBlob?: Blob, voiceSec?: number, fileName?: string, fileSize?: number, fileMime?: string }>` */
+  const [outbox, setOutbox] = useState([]);
+  const tempSeqRef = useRef(0);
   /** attachments queued for the next send: { file, url } — url is a preview for images only */
   const [pending, setPending] = useState([]);
   /** voice recording: true while MediaRecorder is capturing */
   const [recording, setRecording] = useState(false);
   const [recSeconds, setRecSeconds] = useState(0);
   const [recBars, setRecBars] = useState(() => Array.from({ length: 24 }, () => 18));
+  const [typingUsers, setTypingUsers] = useState([]);
+  const [typingCycleIdx, setTypingCycleIdx] = useState(0);
   const { confirm } = useConfirm();
   const { menu, open: openMenu, close: closeMenu } = useContextMenu();
 
   const scrollRef = useRef(null);
+  const contentWrapRef = useRef(null);
   const stickBottom = useRef(true);
+  const initialPinnedRef = useRef(false);
   const lastIdRef = useRef(0);
   const lastReadSent = useRef(0);
   const imgInput = useRef(null);
@@ -90,12 +201,85 @@ export default function ChatView({
   const recAudioCtxRef = useRef(null);
   const recSecondsRef = useRef(0);
   const sendAfterRec = useRef(false);
+  const isTypingActiveRef = useRef(false);
+  const lastTypingSentAtRef = useRef(0);
+  const typingStopTimerRef = useRef(null);
+  const clientKeyMapRef = useRef(new Map());
 
   useEffect(() => {
     setSelectMode(false);
     setSelected(new Set());
     setEditing(null);
+    setShowJumpDown(false);
+    setTypingUsers([]);
+    setTypingCycleIdx(0);
+    isTypingActiveRef.current = false;
+    lastTypingSentAtRef.current = 0;
+    if (typingStopTimerRef.current) clearTimeout(typingStopTimerRef.current);
+    setOutbox((prev) => {
+      prev.forEach((item) => item.localUrls?.forEach((u) => URL.revokeObjectURL(u)));
+      return [];
+    });
+    stickBottom.current = true;
+    initialPinnedRef.current = false;
+    clientKeyMapRef.current.clear();
+    // Clear typing state on unmount or conversation switch
+    return () => {
+      if (isTypingActiveRef.current) {
+        void apiFetch(`/api/conversations/${conversationId}/typing`, {
+          method: "POST",
+          json: { typing: false },
+        }).catch(() => {});
+      }
+    };
   }, [conversationId]);
+
+  // Smoothly cycle typing names when 2+ users are typing simultaneously
+  useEffect(() => {
+    if (typingUsers.length < 2) {
+      setTypingCycleIdx(0);
+      return;
+    }
+    const timer = setInterval(() => {
+      setTypingCycleIdx((prev) => (prev + 1) % typingUsers.length);
+    }, 2100);
+    return () => clearInterval(timer);
+  }, [typingUsers.length]);
+
+  const sendTypingSignal = useCallback(
+    (active) => {
+      if (!conversationId || detail?.type === "saved") return;
+      if (!active) {
+        if (!isTypingActiveRef.current) return;
+        isTypingActiveRef.current = false;
+        lastTypingSentAtRef.current = 0;
+        if (typingStopTimerRef.current) clearTimeout(typingStopTimerRef.current);
+        void apiFetch(`/api/conversations/${conversationId}/typing`, {
+          method: "POST",
+          json: { typing: false },
+        }).catch(() => {});
+        return;
+      }
+      const now = Date.now();
+      if (!isTypingActiveRef.current || now - lastTypingSentAtRef.current > 2400) {
+        isTypingActiveRef.current = true;
+        lastTypingSentAtRef.current = now;
+        void apiFetch(`/api/conversations/${conversationId}/typing`, {
+          method: "POST",
+          json: { typing: true },
+        }).catch(() => {});
+      }
+      if (typingStopTimerRef.current) clearTimeout(typingStopTimerRef.current);
+      typingStopTimerRef.current = setTimeout(() => {
+        isTypingActiveRef.current = false;
+        void apiFetch(`/api/conversations/${conversationId}/typing`, {
+          method: "POST",
+          json: { typing: false },
+        }).catch(() => {});
+      }, 3600);
+    },
+    [conversationId, detail?.type],
+  );
 
   // a voice recording must not outlive the chat view
   useEffect(() => () => {
@@ -121,6 +305,43 @@ export default function ChatView({
       cbRef.current.onClosed();
     }
   }, [conversationId]);
+
+  // When opening the info sidebar on a direct chat, load the peer's rich profile (banner, bio, photos, status, relation)
+  useEffect(() => {
+    if (!showInfo || detail?.type !== "direct" || !detail.peer?.id) {
+      setPeerProfile(null);
+      return;
+    }
+    let alive = true;
+    const pid = detail.peer.id;
+    apiFetch(`/api/users/${pid}/profile`)
+      .then((d) => {
+        if (alive) setPeerProfile(d.profile);
+      })
+      .catch(() => {});
+    apiFetch("/api/friends")
+      .then((d) => {
+        if (!alive) return;
+        const find = (list) => list.find((f) => f.user.id === pid);
+        if (find(d.friends)) {
+          setPeerRelation("friend");
+          setPeerFriendId(find(d.friends).id);
+        } else if (find(d.incoming)) {
+          setPeerRelation("incoming");
+          setPeerFriendId(find(d.friends)?.id ?? find(d.incoming).id);
+        } else if (find(d.outgoing)) {
+          setPeerRelation("outgoing");
+          setPeerFriendId(find(d.outgoing).id);
+        } else {
+          setPeerRelation("none");
+          setPeerFriendId(null);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [showInfo, detail?.type, detail?.peer?.id]);
 
   const markRead = useCallback(
     (id) => {
@@ -155,46 +376,103 @@ export default function ChatView({
     };
   }, [conversationId, loadDetail, markRead]);
 
-  // polling for new messages
+  // polling for new messages + live typing state
   useEffect(() => {
     let tick = 0;
+    const pollTyping = () => {
+      void apiFetch(`/api/conversations/${conversationId}/typing`)
+        .then((r) => {
+          if (Array.isArray(r?.typingUsers)) {
+            setTypingUsers(r.typingUsers.filter((u) => u.id !== me.id));
+          }
+        })
+        .catch(() => {});
+    };
+    pollTyping();
     const t = setInterval(async () => {
       tick++;
+      pollTyping();
       try {
-        if (tick % 12 === 0) {
-          // full resync of latest page to catch deletions
+        // Sync readBy receipts & deletions every ~4.5s, and refresh peer presence/detail too
+        if (tick % 3 === 0) {
           const d = await apiFetch(`/api/conversations/${conversationId}/messages`);
           setMessages((prev) => {
             const map = new Map(prev.map((m) => [m.id, m]));
             d.messages.forEach((m) => map.set(m.id, m));
             return Array.from(map.values()).sort((a, b) => a.id - b.id);
           });
-          loadDetail();
+          if (tick % 6 === 0) loadDetail();
         }
         const d = await apiFetch(
           `/api/conversations/${conversationId}/messages?after=${lastIdRef.current}`
         );
         if (d.messages.length) {
           setMessages((prev) => {
-            const ids = new Set(prev.map((m) => m.id));
-            return [...prev, ...d.messages.filter((m) => !ids.has(m.id))];
+            const map = new Map(prev.map((m) => [m.id, m]));
+            for (const m of d.messages) map.set(m.id, m);
+            return Array.from(map.values()).sort((a, b) => a.id - b.id);
           });
-          lastIdRef.current = d.messages.at(-1).id;
+          lastIdRef.current = Math.max(lastIdRef.current, d.messages.at(-1).id);
           if (document.visibilityState === "visible") markRead(lastIdRef.current);
           if (d.messages.some((m) => m.type === "system")) loadDetail();
           // a message from somebody else arrived while this chat is open
-          if (d.messages.some((m) => m.sender?.id && m.sender.id !== me.id)) playSound("message");
+          if (d.messages.some((m) => (m.sender?.id ?? m.senderId) && (m.sender?.id ?? m.senderId) !== me.id)) {
+            playSound("message");
+          }
         }
       } catch {}
     }, 1500);
     return () => clearInterval(t);
-  }, [conversationId, loadDetail, markRead]);
+  }, [conversationId, loadDetail, markRead, me.id]);
 
-  // auto scroll
+  // Instant, zero-animation scroll-to-bottom on initial load and whenever pinned to bottom
   useLayoutEffect(() => {
     const el = scrollRef.current;
-    if (el && stickBottom.current) el.scrollTop = el.scrollHeight;
-  }, [messages]);
+    if (!el || loading) return;
+    if (!initialPinnedRef.current) {
+      el.scrollTop = el.scrollHeight;
+      stickBottom.current = true;
+      setShowJumpDown(false);
+      if (messages.length > 0 || outbox.length > 0) initialPinnedRef.current = true;
+      return;
+    }
+    if (stickBottom.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [messages, outbox, loading]);
+
+  // Keep bottom pinned without jumpiness when images/fonts OR viewport/window resize!
+  useEffect(() => {
+    const wrap = contentWrapRef.current;
+    const el = scrollRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    let prevClientH = el.clientHeight;
+    const ro = new ResizeObserver(() => {
+      const cur = scrollRef.current;
+      if (!cur) return;
+      const heightGrew = cur.clientHeight > prevClientH;
+      prevClientH = cur.clientHeight;
+      if (stickBottom.current) {
+        cur.scrollTop = cur.scrollHeight;
+        setShowJumpDown(false);
+      } else if (heightGrew) {
+        const distFromBottom = cur.scrollHeight - cur.scrollTop - cur.clientHeight;
+        stickBottom.current = distFromBottom < 110;
+        setShowJumpDown(distFromBottom > 260);
+      }
+    });
+    if (wrap) ro.observe(wrap);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [loading, messages.length, outbox.length]);
+
+  const jumpToBottom = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    stickBottom.current = true;
+    setShowJumpDown(false);
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+  }, []);
 
   async function loadOlder() {
     const first = messages[0];
@@ -224,7 +502,9 @@ export default function ChatView({
   function onScroll() {
     const el = scrollRef.current;
     if (!el) return;
-    stickBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    stickBottom.current = distFromBottom < 110;
+    setShowJumpDown(distFromBottom > 260);
     if (el.scrollTop < 40 && hasMore && !loading) {
       setHasMore(false);
       loadOlder().catch(() => {});
@@ -268,31 +548,20 @@ export default function ChatView({
       return toast("این مرورگر از ضبط صدا پشتیبانی نمی‌کند", "error");
     }
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const audioPrefs = readAudioPrefs();
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: buildMicConstraints(audioPrefs),
+      });
       recStream.current = stream;
-      const recorder = new MediaRecorder(stream);
-      recChunks.current = [];
-      recorder.ondataavailable = (e) => { if (e.data.size) recChunks.current.push(e.data); };
-      recorder.onstop = () => finishRecording();
-      recRef.current = recorder;
-      recorder.start();
-      recSecondsRef.current = 0;
-      setRecSeconds(0);
-      setRecording(true);
-      // Live WebAudio frequency equalizer during recording
-      const Ctx = window.AudioContext || window.webkitAudioContext;
-      if (Ctx) {
-        try {
-          const ctx = new Ctx();
-          recAudioCtxRef.current = ctx;
-          const srcNode = ctx.createMediaStreamSource(stream);
-          const analyser = ctx.createAnalyser();
-          analyser.fftSize = 64;
-          analyser.smoothingTimeConstant = 0.72;
-          srcNode.connect(analyser);
-          const bins = new Uint8Array(analyser.frequencyBinCount);
+      let streamToRecord = stream;
+      try {
+        const pipe = createMicAudioPipeline(stream, audioPrefs);
+        recAudioCtxRef.current = pipe;
+        if (pipe.outputStream) streamToRecord = pipe.outputStream;
+        if (pipe.analyser) {
+          const bins = new Uint8Array(pipe.analyser.frequencyBinCount);
           const tick = () => {
-            analyser.getByteFrequencyData(bins);
+            pipe.analyser.getByteFrequencyData(bins);
             const next = Array.from({ length: 24 }, (_, idx) => {
               const v = bins[idx % bins.length] || 0;
               return Math.max(14, Math.min(100, Math.round((v / 255) * 100)));
@@ -301,10 +570,19 @@ export default function ChatView({
             recAnimRef.current = requestAnimationFrame(tick);
           };
           recAnimRef.current = requestAnimationFrame(tick);
-        } catch {
-          /* ignore WebAudio errors */
         }
+      } catch {
+        /* fallback to raw stream */
       }
+      const recorder = new MediaRecorder(streamToRecord);
+      recChunks.current = [];
+      recorder.ondataavailable = (e) => { if (e.data.size) recChunks.current.push(e.data); };
+      recorder.onstop = () => finishRecording();
+      recRef.current = recorder;
+      recorder.start();
+      recSecondsRef.current = 0;
+      setRecSeconds(0);
+      setRecording(true);
       recTimer.current = setInterval(() => {
         recSecondsRef.current += 1;
         setRecSeconds(recSecondsRef.current);
@@ -329,7 +607,7 @@ export default function ChatView({
       recAnimRef.current = null;
     }
     if (recAudioCtxRef.current) {
-      void recAudioCtxRef.current.close().catch(() => {});
+      recAudioCtxRef.current.close?.();
       recAudioCtxRef.current = null;
     }
     recStream.current?.getTracks().forEach((t) => t.stop());
@@ -346,100 +624,222 @@ export default function ChatView({
     sendAfterRec.current = false;
   }
 
-  async function sendVoice(blob, seconds) {
-    if (blob.size > 15 * 1024 * 1024) return toast("پیام صوتی بیش از حد بزرگ است", "error");
-    const file = new File([blob], `voice-${Date.now()}.webm`, { type: blob.type || "audio/webm" });
-    setSending(true);
-    try {
-      const fd = new FormData();
-      fd.append("file", file);
-      const up = await apiFetch("/api/files", { method: "POST", body: fd });
-      await apiFetch(`/api/conversations/${conversationId}/messages`, {
-        method: "POST",
-        json: { content: String(seconds), fileId: up.file.id },
-      });
-      playSound("send");
-      stickBottom.current = true;
-      const d = await apiFetch(`/api/conversations/${conversationId}/messages?after=${lastIdRef.current}`);
-      if (d.messages.length) {
-        setMessages((prev) => {
-          const ids = new Set(prev.map((m) => m.id));
-          return [...prev, ...d.messages.filter((m) => !ids.has(m.id))];
-        });
-        lastIdRef.current = d.messages.at(-1).id;
-        markRead(lastIdRef.current);
-      }
-      onChanged();
-    } catch (e) {
-      toast(e.message, "error");
-    } finally {
-      setSending(false);
-    }
+  function cancelOutboxItem(tempId) {
+    setOutbox((prev) => {
+      const target = prev.find((x) => x.tempId === tempId);
+      target?.localUrls?.forEach((u) => URL.revokeObjectURL(u));
+      return prev.filter((x) => x.tempId !== tempId);
+    });
   }
 
-  async function send() {
-    if (sending) return;
-    if (editing) return saveEdit();
+  const executeOutboxItem = useCallback(
+    async (item) => {
+      setOutbox((prev) =>
+        prev.map((x) => (x.tempId === item.tempId ? { ...x, status: "sending", errorText: "" } : x)),
+      );
+      try {
+        const sentMsgs = [];
+        if (item.type === "voice" && item.voiceBlob) {
+          const file = new File([item.voiceBlob], `voice-${Date.now()}.webm`, {
+            type: item.voiceBlob.type || "audio/webm",
+          });
+          const fd = new FormData();
+          fd.append("file", file);
+          const up = await apiFetch("/api/files", { method: "POST", body: fd });
+          const sent = await apiFetch(`/api/conversations/${conversationId}/messages`, {
+            method: "POST",
+            json: { content: String(item.voiceSec || 1), fileId: up.file.id },
+          });
+          if (sent?.message) sentMsgs.push(sent.message);
+        } else if (item.files?.length) {
+          const imageFileIds = [];
+          const otherFileIds = [];
+          for (const f of item.files) {
+            const fd = new FormData();
+            fd.append("file", f);
+            const up = await apiFetch("/api/files", { method: "POST", body: fd });
+            if (f.type?.startsWith("image/")) {
+              imageFileIds.push(up.file.id);
+              // Pre-warm AuthedImage blob cache so switching from optimistic to server message never flickers!
+              rememberBlob(up.file.id, f);
+            } else {
+              otherFileIds.push(up.file.id);
+            }
+          }
+          let captionUsed = false;
+          if (imageFileIds.length > 0) {
+            const sent = await apiFetch(`/api/conversations/${conversationId}/messages`, {
+              method: "POST",
+              json: { content: item.content || "", fileId: imageFileIds[0], fileIds: imageFileIds },
+            });
+            if (sent?.message) sentMsgs.push(sent.message);
+            captionUsed = true;
+          }
+          for (let i = 0; i < otherFileIds.length; i++) {
+            const sent = await apiFetch(`/api/conversations/${conversationId}/messages`, {
+              method: "POST",
+              json: { content: !captionUsed && i === 0 ? item.content || "" : "", fileId: otherFileIds[i] },
+            });
+            if (sent?.message) sentMsgs.push(sent.message);
+          }
+        } else {
+          const sent = await apiFetch(`/api/conversations/${conversationId}/messages`, {
+            method: "POST",
+            json: { content: item.content, fileId: undefined },
+          });
+          if (sent?.message) sentMsgs.push(sent.message);
+        }
+
+        if (sentMsgs.length > 0) {
+          const normalized = sentMsgs.map((msg) => ({
+            ...msg,
+            senderId: msg.senderId ?? me.id,
+            sender: msg.sender || {
+              id: me.id,
+              username: me.username,
+              displayName: me.displayName,
+              avatarColor: me.avatarColor,
+              avatarFileId: me.avatarFileId ?? null,
+            },
+            readBy: Array.isArray(msg.readBy) ? msg.readBy : [],
+          }));
+          // Preserve exact same React DOM key on the primary sent message so the bubble morphs in-place!
+          clientKeyMapRef.current.set(normalized[0].id, item.id);
+          setMessages((prev) => {
+            const map = new Map(prev.map((m) => [m.id, m]));
+            for (const nm of normalized) map.set(nm.id, nm);
+            return Array.from(map.values()).sort((a, b) => a.id - b.id);
+          });
+          const maxCreatedId = Math.max(...normalized.map((nm) => nm.id));
+          if (maxCreatedId > lastIdRef.current) {
+            lastIdRef.current = maxCreatedId;
+            markRead(maxCreatedId);
+          }
+        }
+
+        // Remove optimistic placeholder immediately once the real message is in `messages`
+        setOutbox((prev) => {
+          const done = prev.find((x) => x.tempId === item.tempId);
+          done?.localUrls?.forEach((u) => URL.revokeObjectURL(u));
+          return prev.filter((x) => x.tempId !== item.tempId);
+        });
+        cbRef.current.onChanged();
+      } catch (e) {
+        setOutbox((prev) =>
+          prev.map((x) =>
+            x.tempId === item.tempId
+              ? { ...x, status: "failed", errorText: e?.message || "ارسال ناموفق" }
+              : x,
+          ),
+        );
+      }
+    },
+    [conversationId, markRead, me.id, me.username, me.displayName, me.avatarColor, me.avatarFileId],
+  );
+
+  function sendVoice(blob, seconds) {
+    if (blob.size > 15 * 1024 * 1024) return toast("پیام صوتی بیش از حد بزرگ است", "error");
+    const tempId = `tmp-${Date.now()}-${++tempSeqRef.current}`;
+    const localUrl = URL.createObjectURL(blob);
+    const item = {
+      tempId,
+      id: tempId,
+      isOptimistic: true,
+      type: "voice",
+      content: String(seconds),
+      voiceBlob: blob,
+      voiceSec: seconds,
+      localUrls: [localUrl],
+      createdAt: new Date().toISOString(),
+      status: "sending",
+      sender: { id: me.id, displayName: me.displayName, avatarColor: me.avatarColor, avatarFileId: me.avatarFileId },
+    };
+    playSound("send");
+    stickBottom.current = true;
+    setOutbox((prev) => [...prev, item]);
+    void executeOutboxItem(item);
+  }
+
+  function send() {
+    if (editing) return void saveEdit();
     if (recording) return; // the recording bar owns the send button while capturing
     const content = text.trim();
     if (!content && !pending.length) return;
-    setSending(true);
-    try {
-      const imageFileIds = [];
-      const otherFileIds = [];
-      for (const p of pending) {
-        const fd = new FormData();
-        fd.append("file", p.file);
-        const up = await apiFetch("/api/files", { method: "POST", body: fd });
-        if (p.file.type?.startsWith("image/")) imageFileIds.push(up.file.id);
-        else otherFileIds.push(up.file.id);
-      }
-      let captionUsed = false;
-      if (imageFileIds.length > 0) {
-        await apiFetch(`/api/conversations/${conversationId}/messages`, {
-          method: "POST",
-          json: {
-            content,
-            fileId: imageFileIds[0],
-            fileIds: imageFileIds,
-          },
-        });
-        captionUsed = true;
-      }
-      for (let i = 0; i < otherFileIds.length; i++) {
-        await apiFetch(`/api/conversations/${conversationId}/messages`, {
-          method: "POST",
-          json: { content: !captionUsed && i === 0 ? content : "", fileId: otherFileIds[i] },
-        });
-      }
-      if (!imageFileIds.length && !otherFileIds.length) {
-        await apiFetch(`/api/conversations/${conversationId}/messages`, {
-          method: "POST",
-          json: { content, fileId: undefined },
-        });
-      }
-      playSound("send");
-      setText("");
-      clearPending();
-      setShowEmoji(false);
-      stickBottom.current = true;
-      const d = await apiFetch(
-        `/api/conversations/${conversationId}/messages?after=${lastIdRef.current}`
-      );
-      if (d.messages.length) {
-        setMessages((prev) => {
-          const ids = new Set(prev.map((m) => m.id));
-          return [...prev, ...d.messages.filter((m) => !ids.has(m.id))];
-        });
-        lastIdRef.current = d.messages.at(-1).id;
-        markRead(lastIdRef.current);
-      }
-      onChanged();
-    } catch (e) {
-      toast(e.message, "error");
-    } finally {
-      setSending(false);
-      taRef.current?.focus();
+
+    const filesSnapshot = pending.map((p) => p.file);
+    const imageFiles = filesSnapshot.filter((f) => f.type?.startsWith("image/"));
+    const otherFiles = filesSnapshot.filter((f) => !f.type?.startsWith("image/"));
+
+    // Clear composer & typing state IMMEDIATELY so user can keep typing without waiting!
+    sendTypingSignal(false);
+    setText("");
+    if (taRef.current) taRef.current.style.height = "auto";
+    setPending([]); // don't revoke p.url yet if we create fresh object URLs below; clean old ones:
+    pending.forEach((p) => p.url && URL.revokeObjectURL(p.url));
+    setShowEmoji(false);
+    playSound("send");
+    stickBottom.current = true;
+    taRef.current?.focus();
+
+    const nowIso = new Date().toISOString();
+    const senderInfo = {
+      id: me.id,
+      displayName: me.displayName,
+      avatarColor: me.avatarColor,
+      avatarFileId: me.avatarFileId,
+    };
+
+    const itemsToQueue = [];
+    if (imageFiles.length > 0) {
+      const urls = imageFiles.map((f) => URL.createObjectURL(f));
+      itemsToQueue.push({
+        tempId: `tmp-${Date.now()}-${++tempSeqRef.current}`,
+        id: `tmp-img-${tempSeqRef.current}`,
+        isOptimistic: true,
+        type: "image",
+        content: content,
+        files: imageFiles,
+        localUrls: urls,
+        createdAt: nowIso,
+        status: "sending",
+        sender: senderInfo,
+      });
+    }
+    otherFiles.forEach((f, idx) => {
+      itemsToQueue.push({
+        tempId: `tmp-${Date.now()}-${++tempSeqRef.current}`,
+        id: `tmp-file-${tempSeqRef.current}`,
+        isOptimistic: true,
+        type: "file",
+        content: imageFiles.length === 0 && idx === 0 ? content : "",
+        files: [f],
+        fileName: f.name,
+        fileSize: f.size,
+        fileMime: f.type,
+        localUrls: [],
+        createdAt: nowIso,
+        status: "sending",
+        sender: senderInfo,
+      });
+    });
+    if (!imageFiles.length && !otherFiles.length) {
+      itemsToQueue.push({
+        tempId: `tmp-${Date.now()}-${++tempSeqRef.current}`,
+        id: `tmp-txt-${tempSeqRef.current}`,
+        isOptimistic: true,
+        type: "text",
+        content,
+        files: [],
+        localUrls: [],
+        createdAt: nowIso,
+        status: "sending",
+        sender: senderInfo,
+      });
+    }
+
+    setOutbox((prev) => [...prev, ...itemsToQueue]);
+    for (const item of itemsToQueue) {
+      void executeOutboxItem(item);
     }
   }
 
@@ -707,6 +1107,75 @@ export default function ChatView({
     }
   }
 
+  async function openForwardModal(msgIds) {
+    const valid = msgIds.filter(Boolean);
+    if (!valid.length) return;
+    setForwardModalIds(valid);
+    setForwardTargets([]);
+    setForwardIncludeSaved(false);
+    setForwardSearch("");
+    if (Array.isArray(convs) && convs.length) {
+      setLocalConvs(convs);
+    } else {
+      try {
+        const d = await apiFetch("/api/conversations");
+        setLocalConvs(d.conversations || []);
+      } catch {}
+    }
+  }
+
+  async function submitForward() {
+    if (!forwardModalIds.length || (!forwardTargets.length && !forwardIncludeSaved)) return;
+    setForwardingBusy(true);
+    try {
+      const destIds = [...forwardTargets];
+      if (forwardIncludeSaved) {
+        const savedConv = (convs || localConvs).find((c) => c.type === "saved");
+        if (savedConv) {
+          if (!destIds.includes(savedConv.id)) destIds.push(savedConv.id);
+        } else {
+          const created = await apiFetch("/api/direct", { method: "POST", json: { saved: true } });
+          if (created?.conversationId && !destIds.includes(created.conversationId)) {
+            destIds.push(created.conversationId);
+          }
+        }
+      }
+      await apiFetch("/api/messages/forward", {
+        method: "POST",
+        json: {
+          messageIds: forwardModalIds,
+          targetConversationIds: destIds,
+        },
+      });
+      toast(
+        destIds.length > 1
+          ? `به ${faNum(destIds.length)} گفتگو فوروارد شد`
+          : "پیام با موفقیت فوروارد شد",
+        "success",
+      );
+      setForwardModalIds([]);
+      setForwardTargets([]);
+      setForwardIncludeSaved(false);
+      if (selectMode) exitSelect();
+      onChanged();
+      // If forwarded into the currently open chat, refresh messages immediately
+      if (destIds.includes(conversationId)) {
+        const d = await apiFetch(`/api/conversations/${conversationId}/messages?after=${lastIdRef.current}`);
+        if (d.messages?.length) {
+          setMessages((prev) => {
+            const seen = new Set(prev.map((x) => x.id));
+            return [...prev, ...d.messages.filter((x) => !seen.has(x.id))];
+          });
+          lastIdRef.current = d.messages.at(-1).id;
+        }
+      }
+    } catch (e) {
+      toast(e.message, "error");
+    } finally {
+      setForwardingBusy(false);
+    }
+  }
+
   const myRole = detail?.myRole || "member";
   const isMod = myRole === "owner" || myRole === "admin";
   const canDeleteAny = isMod || me.permissions.includes("messages.delete_any");
@@ -721,10 +1190,42 @@ export default function ChatView({
   const memberIds = new Set(members.map((m) => m.id));
   const invitable = friends.filter((f) => !memberIds.has(f.user.id));
 
+  async function openForwardedUserProfile(m) {
+    if (!onOpenProfile) return;
+    if (m.forwardedFromUserId) {
+      onOpenProfile(m.forwardedFromUserId);
+      return;
+    }
+    const rawName = (m.forwardedFrom || "").trim();
+    if (!rawName) return;
+    // Check in-memory conversation members first
+    const localHit = members.find(
+      (u) => u.displayName === rawName || u.username === rawName.replace(/^@/, ""),
+    );
+    if (localHit?.id) {
+      onOpenProfile(localHit.id);
+      return;
+    }
+    try {
+      const r = await apiFetch(`/api/users/search?q=${encodeURIComponent(rawName)}`);
+      const users = r?.users || [];
+      const exact =
+        users.find((u) => u.displayName === rawName || u.username === rawName.replace(/^@/, "")) ||
+        users[0];
+      if (exact?.id) {
+        onOpenProfile(exact.id);
+      } else {
+        toast("پروفایل این کاربر پیدا نشد", "info");
+      }
+    } catch {
+      toast("امکان باز کردن پروفایل وجود ندارد", "error");
+    }
+  }
+
   return (
-    <div className="flex min-h-0 flex-1">
+    <div className="flex min-h-0 flex-1 overflow-hidden">
       <div
-        className="relative flex min-w-0 flex-1 flex-col"
+        className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
         onDragOver={(e) => {
           e.preventDefault();
           setDragOver(true);
@@ -736,9 +1237,11 @@ export default function ChatView({
           pickFiles(e.dataTransfer.files);
         }}
       >
+        <ChatWallpaperBackdrop />
+
         {/* header */}
         <div
-          className="flex items-center gap-3 border-b border-line bg-surface/50 px-4 py-3 backdrop-blur"
+          className="relative z-20 flex items-center gap-2.5 border-b border-line/75 bg-surface/78 px-3 py-2 backdrop-blur-xl sm:px-4"
           onContextMenu={(event) => {
             if (!detail) return;
             const items = [
@@ -768,31 +1271,58 @@ export default function ChatView({
             openMenu(event, items);
           }}
         >
-          <button onClick={onBack} aria-label="بازگشت" className="flex h-9 w-9 items-center justify-center rounded-xl text-muted hover:bg-surface-2 md:hidden">
-            <Icon name="arrow-right" size={18} />
+          <button onClick={onBack} aria-label="بازگشت" className="flex h-8 w-8 items-center justify-center rounded-xl text-muted hover:bg-surface-2 md:hidden">
+            <Icon name="arrow-right" size={17} />
           </button>
           {detail && (
-            <button onClick={() => setShowInfo((s) => !s)} className="flex min-w-0 flex-1 items-center gap-3 text-right">
+            <button onClick={() => setShowInfo((s) => !s)} className="flex min-w-0 flex-1 items-center gap-2.5 text-right">
               {detail.type === "saved" ? (
-                <span className="grad-accent flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-lg text-on-accent shadow-sm">
-                  <Icon name="bookmark" size={20} />
+                <span className="grad-accent flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-on-accent shadow-sm">
+                  <Icon name="bookmark" size={18} />
                 </span>
               ) : detail.type === "direct" ? (
-                <Avatar name={detail.name} color={detail.peer?.avatarColor} lastSeenAt={detail.peer?.lastSeenAt} size={44} userId={detail.peer?.id} avatarFileId={detail.peer?.avatarFileId} />
+                <Avatar name={detail.name} color={detail.peer?.avatarColor} status={detail.peer?.status} lastSeenAt={detail.peer?.lastSeenAt} size={40} userId={detail.peer?.id} avatarFileId={detail.peer?.avatarFileId} />
               ) : (
-                <Avatar name={detail.name} emoji={detail.emoji} size={44} />
+                <Avatar name={detail.name} emoji={detail.emoji} size={40} />
               )}
               <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <h2 className="truncate font-bold">{detail.name}</h2>
-                  <span className="rounded-full bg-accent/15 px-2 py-0.5 text-[10px] font-semibold text-accent">
-                    {detail.type === "saved" ? "شخصی" : detail.type === "room" ? "اتاق عمومی" : detail.type === "group" ? "گروه خصوصی" : "خصوصی"}
+                <div className="flex items-center gap-1.5">
+                  <h2 className="truncate text-sm font-black text-fg">{detail.name}</h2>
+                  <span className="rounded-md bg-accent/12 px-1.5 py-0.5 text-[9.5px] font-bold text-accent">
+                    {detail.type === "saved" ? "فضای ابری" : detail.type === "room" ? "اتاق عمومی" : detail.type === "group" ? "گروه" : "خصوصی"}
                   </span>
                 </div>
-                {detail.type === "direct" && detail.peer ? (
-                  <StatusLine status={detail.peer.status} text={detail.peer.statusText} emoji={detail.peer.statusEmoji} className="text-muted" />
+                {typingUsers.length > 0 ? (
+                  <div className="flex items-center gap-1.5 text-[11px] font-bold text-accent">
+                    <span className="inline-flex items-center gap-0.5" aria-hidden="true">
+                      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-accent [animation-delay:-0.25s]" />
+                      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-accent [animation-delay:-0.12s]" />
+                      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-accent" />
+                    </span>
+                    {typingUsers.length === 1 ? (
+                      <span className="truncate">
+                        {detail.type === "direct"
+                          ? "در حال نوشتن…"
+                          : `${typingUsers[0].displayName} در حال نوشتن…`}
+                      </span>
+                    ) : (
+                      <span className="flex min-w-0 items-center gap-1.5">
+                        <span
+                          key={typingUsers[typingCycleIdx % typingUsers.length]?.id ?? typingCycleIdx}
+                          className="anim-fade-in truncate"
+                        >
+                          {typingUsers[typingCycleIdx % typingUsers.length]?.displayName} در حال نوشتن…
+                        </span>
+                        <span className="shrink-0 rounded-full border border-accent/35 bg-accent/15 px-1.5 py-0.5 text-[9.5px] font-black text-accent">
+                          {faNum(typingUsers.length)} نفر
+                        </span>
+                      </span>
+                    )}
+                  </div>
+                ) : detail.type === "direct" && detail.peer ? (
+                  <StatusLine status={detail.peer.status} text={detail.peer.statusText} emoji={detail.peer.statusEmoji} className="text-[11px] text-muted" />
                 ) : (
-                  <p className={`truncate text-xs ${subtitle === "آنلاین" ? "text-emerald-400" : "text-muted"}`}>{subtitle}</p>
+                  <p className={`truncate text-[11px] ${subtitle === "آنلاین" ? "font-semibold text-emerald-400" : "text-muted"}`}>{subtitle}</p>
                 )}
               </div>
             </button>
@@ -802,55 +1332,82 @@ export default function ChatView({
               onClick={() => { setPickedMembers([]); setAddModalOpen(true); }}
               title="افزودن عضو"
               aria-label="افزودن عضو"
-              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-muted transition hover:bg-surface-2 hover:text-accent"
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-line/70 bg-surface-2/70 text-muted transition hover:border-accent/40 hover:bg-surface-2 hover:text-accent"
             >
-              <Icon name="user-plus" size={18} />
+              <Icon name="user-plus" size={16} />
             </button>
           )}
           {detail && detail.type !== "saved" && me.permissions.includes("voice.join") && (
             <button
               onClick={() => { setShowInfo(false); setShowVoice(true); }}
               title="تماس صوتی"
-              className={`flex h-10 shrink-0 items-center justify-center gap-1.5 rounded-xl px-3 text-xs font-bold transition ${showVoice ? "grad-accent text-on-accent" : "bg-accent/15 text-accent hover:bg-accent/25"}`}
+              className={`press flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-xl border px-3 text-xs font-bold transition ${
+                showVoice ? "border-accent/50 bg-accent/20 text-accent shadow-sm" : "border-accent/25 bg-accent/12 text-accent hover:bg-accent/20"
+              }`}
             >
-              <Icon name="phone" size={17} /><span className="hidden sm:inline">تماس صوتی</span>
+              <Icon name="phone" size={15} /><span className="hidden sm:inline">تماس صوتی</span>
             </button>
           )}
           <button
             onClick={() => { setShowVoice(false); setShowInfo((s) => !s); }}
-            title="اطلاعات"
-            className={`flex h-10 w-10 items-center justify-center rounded-xl transition ${showInfo ? "bg-accent/20 text-accent" : "text-muted hover:bg-surface-2 hover:text-fg"}`}
+            title="اطلاعات گفتگو"
+            className={`flex h-9 w-9 items-center justify-center rounded-xl border transition ${showInfo ? "border-accent/40 bg-accent/15 text-accent" : "border-line/70 bg-surface-2/70 text-muted hover:bg-surface-2 hover:text-fg"}`}
           >
-            <Icon name="info" size={19} />
+            <Icon name="info" size={17} />
           </button>
         </div>
 
-        {/* messages */}
-        <div ref={scrollRef} onScroll={onScroll} className="scroll-thin scroll-smooth-y flex-1 overflow-y-auto px-3 py-4 sm:px-6">
+        {/* Middle viewport wrapper: independent scrolling messages over shared full-bleed wallpaper */}
+        <div className="relative z-10 flex min-h-0 flex-1 flex-col overflow-hidden">
+          {/* messages — NO scroll-smooth-y here so initial load jumps to bottom instantaneously! */}
+          <div
+            ref={scrollRef}
+            onScroll={onScroll}
+            className="scroll-thin relative z-10 min-h-0 flex-1 overflow-y-auto overscroll-contain px-2.5 pt-3 pb-2 sm:px-4 sm:pt-4 sm:pb-2.5"
+          >
           {loading ? (
-            <div className="space-y-3">
-              {Array.from({ length: 6 }).map((_, i) => (
-                <div key={i} className={`flex ${i % 2 ? "justify-end" : ""}`}>
-                  <div className="h-12 animate-pulse rounded-lg bg-surface-2" style={{ width: `${30 + ((i * 17) % 40)}%` }} />
-                </div>
-              ))}
+            <div className="mx-auto flex h-full max-w-4xl flex-col justify-end space-y-2.5 py-3">
+              {Array.from({ length: 7 }).map((_, i) => {
+                const mineSkel = i % 2 === 1;
+                return (
+                  <div key={i} className={`flex ${mineSkel ? "justify-end" : "justify-start"}`}>
+                    <div
+                      className={`shimmer-track h-11 rounded-2xl border backdrop-blur-sm ${
+                        mineSkel
+                          ? "border-accent/25 bg-accent/12 rounded-bl-md"
+                          : "border-line/70 bg-surface-2/75 rounded-br-md"
+                      }`}
+                      style={{ width: `${24 + ((i * 15) % 36)}%` }}
+                    />
+                  </div>
+                );
+              })}
             </div>
-          ) : messages.length === 0 ? (
-            <div className="flex h-full flex-col items-center justify-center text-center text-muted">
-              <div className="mb-3 flex h-16 w-16 items-center justify-center rounded-xl bg-accent/10 text-accent">
-                <Icon name="chat" size={30} />
+          ) : messages.length === 0 && outbox.length === 0 ? (
+            <div className="flex h-full flex-col items-center justify-center text-center">
+              <div className="rounded-3xl border border-line bg-surface/80 px-7 py-6 shadow-lg backdrop-blur-xl">
+                <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-2xl bg-accent/12 text-accent ring-1 ring-accent/25">
+                  <Icon name={detail?.type === "saved" ? "bookmark" : "chat"} size={26} />
+                </div>
+                <p className="text-sm font-black text-fg">
+                  {detail?.type === "saved" ? "فضای پیام‌های ذخیره‌شدهٔ شما" : `آغاز گفتگو با ${detail?.name ?? ""}`}
+                </p>
+                <p className="mt-1 max-w-xs text-xs leading-5 text-muted">
+                  {detail?.type === "saved"
+                    ? "یادداشت‌ها، لینک‌ها، تصاویر و پیام‌های مهم را اینجا ذخیره یا فوروارد کنید."
+                    : "هنوز پیامی ارسال نشده است؛ اولین پیام، تصویر یا پیام صوتی را بفرستید."}
+                </p>
               </div>
-              <p className="font-semibold text-fg">هنوز پیامی نیست</p>
-              <p className="text-sm">اولین پیام را شما بفرستید!</p>
             </div>
           ) : (
-            <div className="mx-auto max-w-3xl space-y-1">
-              {messages.map((m, i) => {
-                const prev = messages[i - 1];
+            <div className="flex min-h-full flex-col justify-end">
+              <div ref={contentWrapRef} className="mx-auto w-full max-w-4xl pb-2">
+              {[...messages, ...outbox].map((m, i, allList) => {
+                const prev = allList[i - 1];
                 const newDay = !prev || new Date(prev.createdAt).toDateString() !== new Date(m.createdAt).toDateString();
                 const dayEl = newDay ? (
-                  <div className="sticky top-0 z-10 flex justify-center py-3">
-                    <span className="rounded-full bg-surface/90 px-3 py-1 text-[11px] text-muted shadow-sm backdrop-blur">
+                  <div className="sticky top-1 z-10 flex justify-center py-2">
+                    <span className="rounded-full border border-line/70 bg-surface/90 px-2.5 py-0.5 text-[10.5px] font-semibold text-muted shadow-sm backdrop-blur">
                       {formatDay(m.createdAt)}
                     </span>
                   </div>
@@ -859,33 +1416,194 @@ export default function ChatView({
                   return (
                     <div key={m.id}>
                       {dayEl}
-                      <div className="flex justify-center py-1.5">
-                        <span className="rounded-full bg-accent/10 px-3 py-1 text-[11px] text-accent">{m.content}</span>
+                      <div className="flex justify-center py-1">
+                        <span className="rounded-full border border-accent/20 bg-accent/10 px-2.5 py-0.5 text-[10.5px] font-semibold text-accent">{m.content}</span>
                       </div>
                     </div>
                   );
                 }
-                const mine = m.sender?.id === me.id;
+                const isOpt = Boolean(m.isOptimistic);
+                const isFailed = isOpt && m.status === "failed";
+                const isSendingOpt = isOpt && m.status === "sending";
+                const msgSenderId = m.sender?.id ?? m.senderId ?? null;
+                const mine = isOpt || msgSenderId === me.id;
+                const prevSenderId = prev ? (prev.isOptimistic ? me.id : (prev.sender?.id ?? prev.senderId ?? null)) : null;
                 const grouped =
                   !newDay &&
                   prev &&
                   prev.type !== "system" &&
-                  prev.sender?.id === m.sender?.id &&
+                  prevSenderId !== null &&
+                  prevSenderId === (mine ? me.id : msgSenderId) &&
                   new Date(m.createdAt).getTime() - new Date(prev.createdAt).getTime() < 5 * 60 * 1000;
-                  const showSender = !mine && detail?.type !== "direct" && detail?.type !== "saved" && !grouped;
+                const showSender = !mine && detail?.type !== "direct" && detail?.type !== "saved" && !grouped;
+
+                const openBubbleMenu = (event) => {
+                  if (isOpt) {
+                    const optItems = [
+                      { type: "label", label: isFailed ? "خطا در ارسال پیام" : "در حال ارسال…" },
+                    ];
+                    if (isFailed) {
+                      optItems.push({
+                        type: "item",
+                        key: "retry",
+                        label: "تلاش مجدد",
+                        icon: "refresh",
+                        onClick: () => void executeOutboxItem(m),
+                      });
+                    }
+                    optItems.push({
+                      type: "item",
+                      key: "copy",
+                      label: "کپی پیام",
+                      icon: "copy",
+                      onClick: () => {
+                        const copyableText =
+                          m.content && m.type !== "voice"
+                            ? m.content
+                            : m.fileName || (m.type === "voice" ? "پیام صوتی" : m.type === "image" ? "تصویر" : "");
+                        const firstImgFile = m.type === "image" && m.files?.[0];
+                        if (!m.content && firstImgFile && typeof ClipboardItem !== "undefined" && firstImgFile.type === "image/png" && navigator.clipboard?.write) {
+                          void navigator.clipboard
+                            .write([new ClipboardItem({ "image/png": firstImgFile })])
+                            .then(() => toast("تصویر کپی شد", "success"))
+                            .catch(() =>
+                              navigator.clipboard
+                                ?.writeText(copyableText)
+                                .then(() => toast("مشخصات پیام کپی شد", "success"))
+                                .catch(() => toast("کپی انجام نشد", "error"))
+                            );
+                          return;
+                        }
+                        void navigator.clipboard
+                          ?.writeText(copyableText)
+                          .then(() => toast("پیام کپی شد", "success"))
+                          .catch(() => toast("کپی انجام نشد", "error"));
+                      },
+                    });
+                    optItems.push({
+                      type: "item",
+                      key: "cancel",
+                      label: "لغو",
+                      icon: "trash",
+                      danger: true,
+                      onClick: () => cancelOutboxItem(m.tempId),
+                    });
+                    openMenu(event, optItems);
+                    return;
+                  }
+
+                  const imageIds = Array.isArray(m.fileIds) && m.fileIds.length ? m.fileIds : m.fileId ? [m.fileId] : [];
+                  const items = [
+                    { type: "label", label: mine ? "پیام شما" : (m.sender?.displayName ?? "پیام") },
+                  ];
+                  if (m.content && m.type !== "meeting" && m.type !== "voice") {
+                    items.push({ type: "item", key: "copy", label: "کپی متن پیام", icon: "copy", onClick: () => { void navigator.clipboard?.writeText(m.content || "").then(() => toast("متن پیام کپی شد", "success")).catch(() => toast("کپی انجام نشد", "error")); } });
+                  }
+                  if (m.type !== "deleted") {
+                    items.push({ type: "item", key: "forward", label: "فوروارد به گفتگوی دیگر…", icon: "forward", onClick: () => void openForwardModal([m.id]) });
+                  }
+                  if (m.type !== "deleted" && detail?.type !== "saved") {
+                    items.push({ type: "item", key: "save", label: "ذخیره در پیام‌های ذخیره‌شده", icon: "bookmark", onClick: () => void saveToVault(m.id) });
+                  }
+                  if (imageIds.length && m.type === "image") items.push({ type: "item", key: "view", label: imageIds.length > 1 ? `نمایش تصاویر (${faNum(imageIds.length)})` : "نمایش تصویر", icon: "image", onClick: () => setLightbox({ ids: imageIds, index: 0 }) });
+                  if (m.fileId) items.push({ type: "item", key: "dl", label: "دانلود فایل", icon: "download", onClick: () => void downloadAuthed(`/api/files/${m.fileId}?download=1`, m.fileName || "file").catch((e) => toast(e.message, "error")) });
+                  if (m.sender && onOpenProfile) items.push({ type: "item", key: "profile", label: "مشاهده پروفایل", icon: "user", onClick: () => m.sender && onOpenProfile(m.sender.id) });
+                  if (!mine && m.sender) items.push({ type: "item", key: "pm", label: `پیام خصوصی به ${m.sender.displayName}`, icon: "chat", onClick: () => m.sender && onOpenDirect(m.sender.id) });
+                  items.push({ type: "divider" });
+                  items.push({ type: "item", key: "select", label: selectMode ? "خروج از حالت انتخاب" : "انتخاب چندتایی پیام‌ها", icon: "check", onClick: () => {
+                    if (selectMode) exitSelect();
+                    else { setSelectMode(true); setSelected(new Set([m.id])); }
+                  } });
+                  if (m.type === "text" && mine) {
+                    items.push({ type: "item", key: "edit", label: "ویرایش پیام", icon: "edit", onClick: () => startEdit(m) });
+                  }
+                  if (m.type !== "deleted" && (mine || canDeleteAny)) {
+                    items.push({ type: "item", key: "del", label: mine ? "حذف پیام من" : "حذف پیام", icon: "trash", danger: true, onClick: () => void deleteMessage(m.id) });
+                  }
+                  if (!mine && m.sender && (canDeleteAny || isMod)) {
+                    const sender = m.sender;
+                    const senderMember = members.find((x) => x.id === sender.id);
+                    items.push({ type: "divider" });
+                    items.push({ type: "label", label: "اقدامات مدیر" });
+                    if (m.type !== "deleted" && canDeleteAny) items.push({ type: "item", key: "moddel", label: "حذف این پیام", icon: "trash", danger: true, onClick: () => void deleteMessage(m.id) });
+                    if (detail?.type !== "direct" && isMod && senderMember && senderMember.role !== "owner") items.push({ type: "item", key: "kick", label: `حذف ${sender.displayName} از ${detail?.type === "room" ? "اتاق" : "گروه"}`, icon: "door", danger: true, onClick: () => void kickMember(senderMember) });
+                  }
+                  if (!mine && m.sender) {
+                    items.push({ type: "divider" });
+                    items.push({ type: "item", key: "block", label: "مسدود کردن فرستنده", icon: "ban", danger: true, onClick: () => m.sender && void blockUser(m.sender.id, m.sender.displayName) });
+                  }
+                  openMenu(event, items);
+                };
+
+                // Render the compact timestamp + clean double-tick seen / single-tick sent / clock meta badge
+                const rcpt = mine && !isOpt ? receiptOf(m) : null;
+                const metaEl = (
+                  <span
+                    dir="ltr"
+                    className={`inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-[9.5px] leading-none select-none ${
+                      isFailed ? "text-rose-400" : mine ? "text-fg/70" : "text-muted"
+                    }`}
+                  >
+                    {!!m.editedAt && <span dir="rtl" className="opacity-80">ویرایش</span>}
+                    <span className="tabular-nums">{formatTime(m.createdAt)}</span>
+                    {mine && (
+                      isSendingOpt ? (
+                        <span className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center text-accent/80" title="در حال ارسال…">
+                          <Icon name="clock" size={11} className="animate-pulse" />
+                        </span>
+                      ) : isFailed ? (
+                        <span className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center text-rose-400" title="ارسال ناموفق">
+                          <Icon name="alert-circle" size={11} />
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const names = readerNames(m);
+                            if (names.length) toast(names.join(" · "), "info");
+                          }}
+                          title={rcpt?.label}
+                          aria-label={rcpt?.label}
+                          className={`no-glass-btn inline-flex h-3.5 shrink-0 items-center justify-center rounded px-0.5 transition-colors ${
+                            rcpt?.seen
+                              ? "text-accent drop-shadow-[0_0_5px_rgb(var(--glow)/0.5)]"
+                              : "text-fg/55"
+                          }`}
+                        >
+                          {rcpt?.seen ? (
+                            /* Crisp dedicated double-check SVG (no overlapping or glass box!) */
+                            <svg viewBox="0 0 20 14" width="15" height="11" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                              <path d="M1.5 7.5L5.2 11.2L12.8 2.8" />
+                              <path d="M7.2 7.5L10.9 11.2L18.5 2.8" />
+                            </svg>
+                          ) : (
+                            <svg viewBox="0 0 14 14" width="11.5" height="11" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                              <path d="M2 7.5L5.7 11.2L12.5 3" />
+                            </svg>
+                          )}
+                        </button>
+                      )
+                    )}
+                  </span>
+                );
+
+                const isLongText = Boolean(m.content && (m.content.length > 48 || m.content.includes("\n")));
+                const rowKey = isOpt ? m.id : (clientKeyMapRef.current.get(m.id) || m.id);
+
                 return (
-                  <div key={m.id}>
+                  <div key={rowKey} className={grouped ? "pt-1.5" : "pt-3"}>
                     {dayEl}
                     <div
-                      className={`group anim-bubble flex items-end gap-2 ${mine ? "flex-row-reverse" : ""} ${grouped ? "mt-0.5" : "mt-3"} ${selectMode ? "cursor-pointer" : ""}`}
-                      onClick={() => selectMode && toggleSelect(m.id)}
-                      onContextMenu={openMessageMenu}
-                      data-message-id={m.id}
+                      className={`group flex items-end gap-1.5 ${mine ? "flex-row-reverse" : ""} ${selectMode && !isOpt ? "cursor-pointer" : ""}`}
+                      onClick={() => selectMode && !isOpt && toggleSelect(m.id)}
+                      onContextMenu={openBubbleMenu}
+                      data-message-id={isOpt ? undefined : m.id}
                     >
-                      {selectMode && (
+                      {selectMode && !isOpt && (
                         <span
-                          className={`mb-6 flex h-5 w-5 shrink-0 items-center justify-center rounded-md border transition ${
-                            selected.has(m.id) ? "border-accent bg-accent text-on-accent" : "border-line bg-surface-2"
+                          className={`mb-4 flex h-5 w-5 shrink-0 items-center justify-center rounded-md border transition ${
+                            selected.has(m.id) ? "border-accent/55 bg-accent/20 text-accent" : "border-line bg-surface-2"
                           }`}
                           aria-hidden="true"
                         >
@@ -893,236 +1611,333 @@ export default function ChatView({
                         </span>
                       )}
                       {!mine && detail?.type !== "direct" && detail?.type !== "saved" && (
-                        <div className="w-9 shrink-0">
+                        <div className="w-8 shrink-0">
                           {!grouped && m.sender && (
                             <button onClick={() => m.sender && (onOpenProfile ? onOpenProfile(m.sender.id) : onOpenDirect(m.sender.id))} title="پروفایل" aria-label={`پروفایل ${m.sender.displayName}`}>
-                              <Avatar name={m.sender.displayName} color={m.sender.avatarColor} size={36} userId={m.sender.id} avatarFileId={m.sender.avatarFileId} />
+                              <Avatar name={m.sender.displayName} color={m.sender.avatarColor} size={32} userId={m.sender.id} avatarFileId={m.sender.avatarFileId} />
                             </button>
                           )}
                         </div>
                       )}
-                      <div className={`bubble-col flex max-w-[85%] flex-col sm:max-w-[65%] ${mine ? "items-end" : "items-start"}`}>
+                      <div className={`bubble-col flex max-w-[86%] flex-col sm:max-w-[70%] ${mine ? "items-end" : "items-start"}`}>
                         {showSender && m.sender && (
                           <button
                             onClick={() => m.sender && (onOpenProfile ? onOpenProfile(m.sender.id) : onOpenDirect(m.sender.id))}
-                            className="mb-1 px-2 text-xs font-bold hover:underline"
+                            className="mb-0.5 px-1.5 text-[11px] font-bold hover:underline"
                             style={{ color: m.sender.avatarColor }}
                           >
                             {m.sender.displayName}
                           </button>
                         )}
-                        <div
-                          onContextMenu={(event) => {
-                            const imageIds = Array.isArray(m.fileIds) && m.fileIds.length ? m.fileIds : m.fileId ? [m.fileId] : [];
-                            const items = [
-                              { type: "label", label: mine ? "پیام شما" : (m.sender?.displayName ?? "پیام") },
-                            ];
-                            if (m.content) items.push({ type: "item", key: "copy", label: "کپی متن پیام", icon: "copy", onClick: () => { void navigator.clipboard?.writeText(m.content || "").then(() => toast("متن پیام کپی شد", "success")).catch(() => toast("کپی انجام نشد", "error")); } });
-                            if (m.type !== "deleted" && detail?.type !== "saved") {
-                              items.push({ type: "item", key: "save", label: "ذخیره در پیام‌های ذخیره‌شده", icon: "bookmark", onClick: () => void saveToVault(m.id) });
+                        <div className={`flex items-end gap-1.5 ${mine ? "flex-row" : "flex-row-reverse"}`}>
+                          {/* Tiny inline error pill next to failed outgoing message */}
+                          {isFailed && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openBubbleMenu(e);
+                              }}
+                              title="خطا در ارسال · کلیک برای تلاش مجدد یا لغو"
+                              className="press mb-1 flex items-center gap-1 rounded-full border border-rose-400/40 bg-rose-500/15 px-2 py-0.5 text-[10px] font-bold text-rose-300 backdrop-blur hover:bg-rose-500/25"
+                            >
+                              <Icon name="alert-circle" size={12} />
+                              <span>خطا · تلاش مجدد</span>
+                            </button>
+                          )}
+
+                          <div
+                            onContextMenu={(e) => {
+                              e.stopPropagation();
+                              openBubbleMenu(e);
+                            }}
+                            style={
+                              mine && m.type !== "deleted"
+                                ? {
+                                    background: isFailed
+                                      ? "color-mix(in srgb, #f43f5e 14%, var(--surface-2))"
+                                      : "linear-gradient(135deg, color-mix(in srgb, var(--accent) 23%, var(--surface-2)), color-mix(in srgb, var(--accent-2) 17%, var(--surface-2)))",
+                                  }
+                                : undefined
                             }
-                            if (imageIds.length && m.type === "image") items.push({ type: "item", key: "view", label: imageIds.length > 1 ? `نمایش تصاویر (${faNum(imageIds.length)})` : "نمایش تصویر", icon: "image", onClick: () => setLightbox({ ids: imageIds, index: 0 }) });
-                            if (m.fileId) items.push({ type: "item", key: "dl", label: "دانلود فایل", icon: "download", onClick: () => void downloadAuthed(`/api/files/${m.fileId}?download=1`, m.fileName || "file").catch((e) => toast(e.message, "error")) });
-                            if (m.sender && onOpenProfile) items.push({ type: "item", key: "profile", label: "مشاهده پروفایل", icon: "user", onClick: () => m.sender && onOpenProfile(m.sender.id) });
-                            if (!mine && m.sender) items.push({ type: "item", key: "pm", label: `پیام خصوصی به ${m.sender.displayName}`, icon: "chat", onClick: () => m.sender && onOpenDirect(m.sender.id) });
-                            items.push({ type: "divider" });
-                            items.push({ type: "item", key: "select", label: selectMode ? "خروج از حالت انتخاب" : "انتخاب پیام‌ها", icon: "check", onClick: () => {
-                              if (selectMode) exitSelect();
-                              else { setSelectMode(true); setSelected(new Set([m.id])); }
-                            } });
-                            if (m.type === "text" && mine) {
-                              items.push({ type: "item", key: "edit", label: "ویرایش پیام", icon: "edit", onClick: () => startEdit(m) });
-                            }
-                            if (m.type !== "deleted" && (mine || canDeleteAny)) {
-                              items.push({ type: "item", key: "del", label: mine ? "حذف پیام من" : "حذف پیام", icon: "trash", danger: true, onClick: () => void deleteMessage(m.id) });
-                            }
-                            if (!mine && m.sender && (canDeleteAny || isMod)) {
-                              const sender = m.sender;
-                              const senderMember = members.find((x) => x.id === sender.id);
-                              items.push({ type: "divider" });
-                              items.push({ type: "label", label: "اقدامات مدیر" });
-                              if (m.type !== "deleted" && canDeleteAny) items.push({ type: "item", key: "moddel", label: "حذف این پیام", icon: "trash", danger: true, onClick: () => void deleteMessage(m.id) });
-                              if (detail?.type !== "direct" && isMod && senderMember && senderMember.role !== "owner") items.push({ type: "item", key: "kick", label: `حذف ${sender.displayName} از ${detail?.type === "room" ? "اتاق" : "گروه"}`, icon: "door", danger: true, onClick: () => void kickMember(senderMember) });
-                            }
-                            if (!mine && m.sender) {
-                              items.push({ type: "divider" });
-                              items.push({ type: "item", key: "block", label: "مسدود کردن فرستنده", icon: "ban", danger: true, onClick: () => m.sender && void blockUser(m.sender.id, m.sender.displayName) });
-                            }
-                            openMenu(event, items);
-                          }}
-                          className={`relative overflow-hidden rounded-xl text-[14.5px] leading-7 shadow-sm ${
-                            m.type === "deleted"
-                              ? "border border-dashed border-line bg-transparent px-4 py-2 italic text-muted"
-                              : mine
-                              ? "grad-accent text-on-accent " + (grouped ? "rounded-bl-3xl" : "rounded-bl-lg")
-                              : "bg-surface-2 text-fg " + (grouped ? "rounded-br-3xl" : "rounded-br-lg")
-                          }`}
-                        >
-                          {m.type === "deleted" ? (
-                            <span className="flex items-center gap-1.5">
-                              <Icon name="ban" size={14} /> این پیام حذف شد
-                            </span>
-                          ) : (
-                            <>
-                              {m.forwardedFrom && (
-                                <p className={`flex items-center gap-1.5 px-3.5 pt-2 text-[11px] font-semibold ${mine ? "text-white/80" : "text-accent"}`}>
-                                  <Icon name="bookmark" size={12} /> ذخیره‌شده از {m.forwardedFrom}
-                                </p>
-                              )}
-                              {m.type === "meeting" && <MeetingInviteCard payload={m.content} mine={mine} />}
-                              {m.type === "voice" && m.fileId && (
-                                <VoiceBubble fileId={m.fileId} duration={Number(m.content) || 0} mine={mine} />
-                              )}
-                              {m.type === "image" && (m.fileId || (Array.isArray(m.fileIds) && m.fileIds.length > 0)) && (() => {
-                                const imgIds = Array.isArray(m.fileIds) && m.fileIds.length ? m.fileIds : [m.fileId];
-                                if (imgIds.length === 1) {
-                                  return (
-                                    <div
-                                      role="button"
-                                      tabIndex={0}
-                                      onClick={() => setLightbox({ ids: imgIds, index: 0 })}
-                                      onKeyDown={(e) => {
-                                        if (e.key === "Enter" || e.key === " ") {
-                                          e.preventDefault();
-                                          setLightbox({ ids: imgIds, index: 0 });
-                                        }
-                                      }}
-                                      className="block w-full cursor-pointer overflow-hidden"
-                                    >
-                                      <AuthedImage
-                                        fileId={imgIds[0]}
-                                        alt={m.fileName || "تصویر"}
-                                        className="max-h-80 w-full max-w-sm object-cover transition hover:brightness-95"
-                                        onLoad={() => {
-                                          const el = scrollRef.current;
-                                          if (el && stickBottom.current) el.scrollTop = el.scrollHeight;
-                                        }}
-                                      />
-                                    </div>
-                                  );
-                                }
-                                const visibleIds = imgIds.slice(0, 4);
-                                const extra = imgIds.length - 4;
-                                return (
-                                  <div className="w-[260px] p-1 sm:w-[330px]">
-                                    <div className={`grid gap-1 overflow-hidden rounded-lg ${imgIds.length === 2 ? "grid-cols-2" : "grid-cols-2"}`}>
-                                      {visibleIds.map((fid, idx) => {
-                                        const spanFull = imgIds.length === 3 && idx === 0;
-                                        const showOverlay = idx === 3 && extra > 0;
-                                        return (
-                                          <div
-                                            key={`${fid}-${idx}`}
-                                            role="button"
-                                            tabIndex={0}
-                                            onClick={() => setLightbox({ ids: imgIds, index: idx })}
-                                            onKeyDown={(e) => {
-                                              if (e.key === "Enter" || e.key === " ") {
-                                                e.preventDefault();
-                                                setLightbox({ ids: imgIds, index: idx });
-                                              }
-                                            }}
-                                            className={`group/img relative block cursor-pointer overflow-hidden bg-black/20 ${spanFull ? "col-span-2 aspect-[16/9]" : "aspect-square"}`}
-                                          >
-                                            <AuthedImage
-                                              fileId={fid}
-                                              alt={`تصویر ${idx + 1}`}
-                                              className="h-full w-full object-cover transition duration-200 group-hover/img:scale-[1.03]"
-                                              onLoad={() => {
-                                                const el = scrollRef.current;
-                                                if (el && stickBottom.current) el.scrollTop = el.scrollHeight;
-                                              }}
-                                            />
-                                            {showOverlay && (
-                                              <span className="absolute inset-0 z-20 flex items-center justify-center bg-black/60 text-lg font-black text-white backdrop-blur-[2px]">
-                                                +{faNum(extra)}
-                                              </span>
-                                            )}
-                                          </div>
-                                        );
-                                      })}
-                                    </div>
-                                  </div>
-                                );
-                              })()}
-                              {m.type === "file" && m.fileId && (
-                                <button
-                                  onClick={() => downloadAuthed(`/api/files/${m.fileId}?download=1`, m.fileName || "file").catch((e) => toast(e.message, "error"))}
-                                  className={`flex items-center gap-3 text-right px-3 pt-3 ${m.content ? "" : "pb-3"}`}
-                                >
-                                  <span className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-lg ${mine ? "bg-white/20 text-white" : "bg-accent/15 text-accent"}`}>
-                                    <Icon name={fileIcon(m.fileMime, m.fileName)} size={22} />
-                                  </span>
-                                  <span className="min-w-0">
-                                    <span className="block max-w-[220px] truncate text-sm font-bold" dir="auto">
-                                      {m.fileName}
-                                    </span>
-                                    <span className={`flex items-center gap-1 text-[11px] ${mine ? "text-white/75" : "text-muted"}`}>
-                                      {formatSize(m.fileSize || 0)}
-                                      <Icon name="download" size={11} />
-                                    </span>
-                                  </span>
-                                </button>
-                              )}
-                              {/* meeting invites and voice notes render as cards; their raw
-                                  payloads must never appear as text */}
-                              {m.type !== "meeting" && m.type !== "voice" && m.content && (
-                                <p className="whitespace-pre-wrap break-words px-4 pt-2 pb-0.5" dir="auto">
-                                  {m.content}
-                                </p>
-                              )}
-                              {/* time + delivery ticks inside the bubble; delete/edit live in the
-                                  right-click menu or in selection mode, never on hover */}
-                              <div className={`flex items-center gap-1.5 px-3.5 pb-1.5 pt-0.5 text-[10px] ${mine ? "justify-end text-white/70" : "justify-end text-muted"}`}>
-                                {!!m.editedAt && <span className="opacity-80">ویرایش‌شده</span>}
-                                <span dir="ltr" className="tabular-nums">{formatTime(m.createdAt)}</span>
-                                {mine && (
+                            className={`relative overflow-hidden rounded-2xl text-[14px] leading-6 shadow-sm backdrop-blur-md transition-opacity ${
+                              isSendingOpt ? "opacity-85" : ""
+                            } ${
+                              m.type === "deleted"
+                                ? "border border-dashed border-line bg-transparent px-3 py-1.5 text-xs italic text-muted"
+                                : mine
+                                ? `border ${isFailed ? "border-rose-400/45" : "border-accent/35"} text-fg ` + (grouped ? "rounded-bl-2xl" : "rounded-bl-md")
+                                : "border border-line/85 bg-surface-2/92 text-fg " + (grouped ? "rounded-br-2xl" : "rounded-br-md")
+                            }`}
+                          >
+                            {m.type === "deleted" ? (
+                              <span className="flex items-center gap-1.5">
+                                <Icon name="ban" size={13} /> این پیام حذف شد
+                              </span>
+                            ) : (
+                              <>
+                                {m.forwardedFrom && (
                                   <button
                                     type="button"
-                                    onClick={() => {
-                                      const names = readerNames(m);
-                                      if (names.length) toast(names.join(" · "), "info");
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      void openForwardedUserProfile(m);
                                     }}
-                                    title={receiptOf(m).label}
-                                    aria-label={receiptOf(m).label}
-                                    className={`relative inline-flex h-3.5 w-4 shrink-0 items-center ${receiptOf(m).seen ? "text-sky-300" : "opacity-70"}`}
+                                    title={`مشاهده پروفایل ${m.forwardedFrom}`}
+                                    className="flex w-full items-center gap-1 border-b border-line/60 bg-surface-3/45 px-3 py-1 text-right text-[10.5px] font-bold text-accent transition hover:bg-accent/15 hover:underline"
                                   >
-                                    <Icon name="check" size={13} className="absolute start-0" strokeWidth={2.4} />
-                                    {receiptOf(m).seen && <Icon name="check" size={13} className="absolute start-1.5" strokeWidth={2.4} />}
+                                    <Icon name="forward" size={11} className="shrink-0" />
+                                    <span className="truncate">فوروارد شده از ({m.forwardedFrom})</span>
                                   </button>
                                 )}
-                              </div>
-                            </>
-                          )}
+                                {m.type === "meeting" && <MeetingInviteCard payload={m.content} mine={mine} />}
+                                {m.type === "voice" && (m.fileId || m.localUrls?.[0]) && (
+                                  <VoiceBubble fileId={m.fileId} localSrc={m.localUrls?.[0]} duration={Number(m.content) || 0} mine={mine} />
+                                )}
+                                {m.type === "image" && (m.fileId || (Array.isArray(m.fileIds) && m.fileIds.length > 0) || m.localUrls?.length > 0) && (() => {
+                                  if (isOpt && m.localUrls?.length) {
+                                    return (
+                                      <div className={m.localUrls.length === 1 ? "block w-full overflow-hidden" : "w-[260px] p-1 sm:w-[330px]"}>
+                                        {m.localUrls.length === 1 ? (
+                                          <img src={m.localUrls[0]} alt="" className="max-h-80 w-full max-w-sm object-cover" />
+                                        ) : (
+                                          <div className="grid grid-cols-2 gap-1 overflow-hidden rounded-lg">
+                                            {m.localUrls.slice(0, 4).map((u, idx) => (
+                                              <img key={idx} src={u} alt="" className="aspect-square h-full w-full object-cover" />
+                                            ))}
+                                          </div>
+                                        )}
+                                      </div>
+                                    );
+                                  }
+                                  const imgIds = Array.isArray(m.fileIds) && m.fileIds.length ? m.fileIds : [m.fileId];
+                                  if (imgIds.length === 1) {
+                                    return (
+                                      <div
+                                        role="button"
+                                        tabIndex={0}
+                                        onClick={() => setLightbox({ ids: imgIds, index: 0 })}
+                                        onKeyDown={(e) => {
+                                          if (e.key === "Enter" || e.key === " ") {
+                                            e.preventDefault();
+                                            setLightbox({ ids: imgIds, index: 0 });
+                                          }
+                                        }}
+                                        className="block w-full cursor-pointer overflow-hidden"
+                                      >
+                                        <AuthedImage
+                                          fileId={imgIds[0]}
+                                          alt={m.fileName || "تصویر"}
+                                          className="max-h-80 w-full max-w-sm object-cover transition hover:brightness-95"
+                                          onLoad={() => {
+                                            const el = scrollRef.current;
+                                            if (el && stickBottom.current) el.scrollTop = el.scrollHeight;
+                                          }}
+                                        />
+                                      </div>
+                                    );
+                                  }
+                                  const visibleIds = imgIds.slice(0, 4);
+                                  const extra = imgIds.length - 4;
+                                  return (
+                                    <div className="w-[260px] p-1 sm:w-[330px]">
+                                      <div className="grid grid-cols-2 gap-1 overflow-hidden rounded-lg">
+                                        {visibleIds.map((fid, idx) => {
+                                          const spanFull = imgIds.length === 3 && idx === 0;
+                                          const showOverlay = idx === 3 && extra > 0;
+                                          return (
+                                            <div
+                                              key={`${fid}-${idx}`}
+                                              role="button"
+                                              tabIndex={0}
+                                              onClick={() => setLightbox({ ids: imgIds, index: idx })}
+                                              onKeyDown={(e) => {
+                                                if (e.key === "Enter" || e.key === " ") {
+                                                  e.preventDefault();
+                                                  setLightbox({ ids: imgIds, index: idx });
+                                                }
+                                              }}
+                                              className={`group/img relative block cursor-pointer overflow-hidden bg-black/20 ${spanFull ? "col-span-2 aspect-[16/9]" : "aspect-square"}`}
+                                            >
+                                              <AuthedImage
+                                                fileId={fid}
+                                                alt={`تصویر ${idx + 1}`}
+                                                className="h-full w-full object-cover transition duration-200 group-hover/img:scale-[1.03]"
+                                                onLoad={() => {
+                                                  const el = scrollRef.current;
+                                                  if (el && stickBottom.current) el.scrollTop = el.scrollHeight;
+                                                }}
+                                              />
+                                              {showOverlay && (
+                                                <span className="absolute inset-0 z-20 flex items-center justify-center bg-black/60 text-lg font-black text-white backdrop-blur-[2px]">
+                                                  +{faNum(extra)}
+                                                </span>
+                                              )}
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                    </div>
+                                  );
+                                })()}
+                                {m.type === "file" && (m.fileId || isOpt) && (
+                                  <button
+                                    disabled={isOpt}
+                                    onClick={() => m.fileId && downloadAuthed(`/api/files/${m.fileId}?download=1`, m.fileName || "file").catch((e) => toast(e.message, "error"))}
+                                    className={`flex items-center gap-3 text-right px-3 pt-2.5 ${m.content ? "" : "pb-2"}`}
+                                  >
+                                    <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-accent/30 bg-accent/15 text-accent">
+                                      <Icon name={fileIcon(m.fileMime, m.fileName)} size={21} />
+                                    </span>
+                                    <span className="min-w-0">
+                                      <span className="block max-w-[220px] truncate text-sm font-bold text-fg" dir="auto">
+                                        {m.fileName}
+                                      </span>
+                                      <span className="flex items-center gap-1 text-[11px] text-muted">
+                                        {formatSize(m.fileSize || 0)}
+                                        {!isOpt && <Icon name="download" size={11} />}
+                                      </span>
+                                    </span>
+                                  </button>
+                                )}
+
+                                {/* Text + Strict Right/Left Timestamp & Seen Layout:
+                                    - My message (`mine === true`): Time + Seen ALWAYS on the RIGHT side (or bottom-right if long).
+                                    - Received message (`mine === false`): Time ALWAYS on the LEFT side (or bottom-left if long). */}
+                                {m.type !== "meeting" && m.type !== "voice" && m.content ? (
+                                  isLongText ? (
+                                    <div className="px-3 pt-1.5 pb-1">
+                                      <div className="whitespace-pre-wrap break-words leading-[1.62]" dir="auto">
+                                        <RichMessageText text={m.content} mine={mine} />
+                                      </div>
+                                      {/* Bottom-Right for mine, Bottom-Left for received */}
+                                      <div dir="ltr" className={`mt-0.5 flex ${mine ? "justify-end" : "justify-start"}`}>
+                                        {metaEl}
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    /* Short message: single compact row — Right side for mine, Left side for received */
+                                    <div
+                                      dir="ltr"
+                                      className={`flex items-end gap-2 px-3 py-1.5 ${
+                                        mine ? "flex-row" : "flex-row-reverse"
+                                      }`}
+                                    >
+                                      <div className="min-w-0 whitespace-pre-wrap break-words leading-[1.6]" dir="auto">
+                                        <RichMessageText text={m.content} mine={mine} />
+                                      </div>
+                                      <div className="shrink-0 pb-[1px]">{metaEl}</div>
+                                    </div>
+                                  )
+                                ) : (
+                                  /* Media / card messages without text caption: Bottom-Right for mine, Bottom-Left for received */
+                                  <div dir="ltr" className={`flex px-2.5 pb-1 pt-0.5 ${mine ? "justify-end" : "justify-start"}`}>
+                                    {metaEl}
+                                  </div>
+                                )}
+                              </>
+                            )}
+                          </div>
                         </div>
                       </div>
+                      {/* Subtle quick-forward action on hover (desktop) */}
+                      {!selectMode && !isOpt && m.type !== "deleted" && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void openForwardModal([m.id]);
+                          }}
+                          title="فوروارد پیام"
+                          aria-label="فوروارد پیام"
+                          className="mb-1 hidden h-7 w-7 shrink-0 items-center justify-center rounded-lg text-muted opacity-0 transition hover:bg-surface-2 hover:text-accent group-hover:opacity-100 sm:flex"
+                        >
+                          <Icon name="forward" size={14} />
+                        </button>
+                      )}
                     </div>
                   </div>
                 );
               })}
+              </div>
             </div>
+          )}
+          </div>
+
+          {/* Floating Jump-to-Bottom Pill when scrolled up (outside scrollRef so it never shifts scroll height) */}
+          {showJumpDown && !loading && (
+            <button
+              type="button"
+              onClick={jumpToBottom}
+              aria-label="پرش به آخرین پیام‌ها"
+              className="press absolute bottom-3 start-4 z-20 flex h-9 items-center gap-1.5 rounded-full border border-accent/40 bg-surface-2/95 px-3 text-xs font-bold text-fg shadow-xl backdrop-blur hover:border-accent hover:text-accent"
+            >
+              <Icon name="chevron-down" size={15} className="text-accent" />
+              <span>آخرین پیام</span>
+            </button>
           )}
         </div>
 
-        {/* composer */}
-        <div className="border-t border-line bg-surface/60 p-2 backdrop-blur sm:p-3">
-          <div className="mx-auto max-w-3xl">
+        {/* Floating glassy composer sitting directly over the chat wallpaper */}
+        <div className="relative z-20 bg-transparent px-2.5 pt-1 pb-2.5 sm:px-3.5 sm:pb-3">
+          <div className="mx-auto max-w-4xl">
+            {/* Live floating typing indicator pill right above the composer */}
+            {typingUsers.length > 0 && (
+              <div className="anim-rise mb-1.5 flex items-center">
+                <div className="inline-flex max-w-full items-center gap-2 rounded-full border border-accent/35 bg-surface/82 px-3 py-1 text-xs font-bold text-fg shadow-lg backdrop-blur-xl">
+                  <span className="inline-flex items-center gap-1" aria-hidden="true">
+                    <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-accent [animation-delay:-0.25s]" />
+                    <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-accent [animation-delay:-0.12s]" />
+                    <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-accent" />
+                  </span>
+                  {typingUsers.length === 1 ? (
+                    <span className="truncate text-[11.5px] text-accent">
+                      {detail?.type === "direct"
+                        ? `${typingUsers[0].displayName} در حال نوشتن است…`
+                        : `${typingUsers[0].displayName} در حال نوشتن…`}
+                    </span>
+                  ) : (
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      <span
+                        key={typingUsers[typingCycleIdx % typingUsers.length]?.id ?? typingCycleIdx}
+                        className="anim-fade-in truncate text-[11.5px] text-accent"
+                      >
+                        {typingUsers[typingCycleIdx % typingUsers.length]?.displayName} در حال نوشتن…
+                      </span>
+                      <span className="shrink-0 rounded-full border border-accent/40 bg-accent/18 px-2 py-0.5 text-[10px] font-black text-accent">
+                        {faNum(typingUsers.length)} نفر هم‌زمان
+                      </span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
             {selectMode && (
-              <div className="anim-rise mb-2 flex items-center gap-2 rounded-lg border border-accent/35 bg-accent/10 px-3 py-2">
-                <span className="text-xs font-bold text-accent">{faNum(selected.size)} پیام انتخاب شده</span>
+              <div className="anim-rise mb-2 flex flex-wrap items-center gap-1.5 rounded-2xl border border-accent/35 bg-surface/85 px-3 py-1.5 shadow-lg backdrop-blur-xl">
+                <span className="text-xs font-black text-accent">{faNum(selected.size)} پیام انتخاب شده</span>
                 <div className="ms-auto flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => void openForwardModal([...selected])}
+                    disabled={!selected.size}
+                    className="press flex items-center gap-1 rounded-xl border border-accent/45 bg-accent/20 px-2.5 py-1.5 text-[11px] font-black text-accent backdrop-blur-md hover:bg-accent/30 disabled:opacity-40"
+                  >
+                    <Icon name="forward" size={13} /> فوروارد
+                  </button>
                   {selected.size === 1 && (() => {
                     const only = messages.find((m) => m.id === [...selected][0]);
                     return only && only.type === "text" && only.sender?.id === me.id ? (
-                      <button onClick={() => startEdit(only)} className="press flex items-center gap-1.5 rounded-xl bg-surface-2 px-3 py-1.5 text-[11px] font-bold"><Icon name="edit" size={13} /> ویرایش</button>
+                      <button onClick={() => startEdit(only)} className="press flex items-center gap-1 rounded-xl border border-line bg-surface-2/80 px-2.5 py-1.5 text-[11px] font-bold hover:bg-surface-3"><Icon name="edit" size={13} /> ویرایش</button>
                     ) : null;
                   })()}
-                  <button onClick={() => void deleteSelected()} disabled={!selected.size} className="press flex items-center gap-1.5 rounded-xl bg-rose-500/15 px-3 py-1.5 text-[11px] font-bold text-rose-400 disabled:opacity-40"><Icon name="trash" size={13} /> حذف</button>
-                  <button onClick={exitSelect} className="press flex items-center gap-1.5 rounded-xl bg-surface-2 px-3 py-1.5 text-[11px] font-bold text-muted"><Icon name="close" size={13} /> لغو</button>
+                  <button onClick={() => void deleteSelected()} disabled={!selected.size} className="press flex items-center gap-1 rounded-xl border border-rose-400/35 bg-rose-500/16 px-2.5 py-1.5 text-[11px] font-bold text-rose-300 disabled:opacity-40"><Icon name="trash" size={13} /> حذف</button>
+                  <button onClick={exitSelect} className="press flex items-center gap-1 rounded-xl border border-line bg-surface-2/80 px-2.5 py-1.5 text-[11px] font-bold text-muted hover:text-fg"><Icon name="close" size={13} /> لغو</button>
                 </div>
               </div>
             )}
             {editing && (
-              <div className="anim-rise mb-2 flex items-start gap-2 rounded-lg border border-accent/35 bg-accent/10 px-3 py-2">
+              <div className="anim-rise mb-2 flex items-start gap-2 rounded-2xl border border-accent/35 bg-surface/85 px-3 py-2 shadow-lg backdrop-blur-xl">
                 <Icon name="edit" size={15} className="mt-0.5 shrink-0 text-accent" />
                 <div className="min-w-0 flex-1">
                   <p className="text-[11px] font-bold text-accent">در حال ویرایش پیام</p>
@@ -1134,7 +1949,7 @@ export default function ChatView({
             {!!pending.length && (
               <div className="scroll-thin anim-pop mb-2 flex gap-2 overflow-x-auto pb-1">
                 {pending.map((p, i) => (
-                  <div key={i} className="relative flex shrink-0 items-center gap-2 rounded-lg bg-surface-2 p-1.5 pe-3">
+                  <div key={i} className="relative flex shrink-0 items-center gap-2 rounded-xl border border-line/80 bg-surface/85 p-1.5 pe-3 shadow-md backdrop-blur-xl">
                     {p.url ? (
                       // eslint-disable-next-line @next/next/no-img-element
                       <img src={p.url} alt="" className="h-12 w-12 rounded-xl object-cover" />
@@ -1155,7 +1970,7 @@ export default function ChatView({
               </div>
             )}
             {recording && (
-              <div className="anim-rise mb-2 flex items-center gap-3 rounded-xl bg-rose-500/10 px-3 py-2.5 ring-1 ring-rose-500/40">
+              <div className="anim-rise mb-2 flex items-center gap-3 rounded-2xl border border-rose-400/40 bg-surface/85 px-3 py-2.5 shadow-xl backdrop-blur-2xl">
                 <span className="relative flex h-3 w-3 shrink-0">
                   <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-rose-500 opacity-75" />
                   <span className="relative inline-flex h-3 w-3 rounded-full bg-rose-500" />
@@ -1172,8 +1987,8 @@ export default function ChatView({
                     />
                   ))}
                 </div>
-                <button onClick={() => stopRecording(false)} className="press rounded-xl bg-surface-2 px-3 py-1.5 text-[11px] font-bold text-muted hover:text-fg">لغو</button>
-                <button onClick={() => stopRecording(true)} disabled={recSeconds < 1} className="grad-accent press flex h-10 w-10 items-center justify-center rounded-lg text-on-accent disabled:opacity-40" title="پایان ضبط و ارسال">
+                <button onClick={() => stopRecording(false)} className="press rounded-xl border border-line bg-surface-2/80 px-3 py-1.5 text-[11px] font-bold text-muted hover:text-fg">لغو</button>
+                <button onClick={() => stopRecording(true)} disabled={recSeconds < 1} className="press flex h-10 w-10 items-center justify-center rounded-xl border border-accent/50 bg-accent/22 text-accent backdrop-blur-md hover:bg-accent/32 disabled:opacity-40" title="پایان ضبط و ارسال">
                   <Icon name="send" size={18} className="-scale-x-100" />
                 </button>
               </div>
@@ -1184,39 +1999,41 @@ export default function ChatView({
               </div>
             )}
             {!recording && (
-            <div className="flex items-end gap-2 rounded-xl bg-surface-2 p-1.5 transition focus-within:ring-1 focus-within:ring-accent/50">
+            <div className="flex items-end gap-1.5 rounded-2xl border border-line/85 bg-surface/76 p-1.5 shadow-[0_12px_36px_rgba(0,0,0,0.28)] backdrop-blur-2xl transition focus-within:border-accent/60 focus-within:ring-1 focus-within:ring-accent/30">
               <div className="flex items-center">
-                <button onClick={() => setShowEmoji((s) => !s)} title="ایموجی" aria-label="ایموجی" className="flex h-10 w-10 items-center justify-center rounded-lg text-muted hover:bg-surface-3 hover:text-accent">
-                  <Icon name="smile" size={20} />
+                <button onClick={() => setShowEmoji((s) => !s)} title="ایموجی" aria-label="ایموجی" className="flex h-9 w-9 items-center justify-center rounded-xl text-muted transition hover:bg-surface-2/80 hover:text-accent">
+                  <Icon name="smile" size={19} />
                 </button>
                 {me.permissions.includes("images.upload") && (
-                  <button onClick={() => imgInput.current?.click()} title="ارسال تصویر (چند عکس)" aria-label="ارسال تصویر" className="flex h-10 w-10 items-center justify-center rounded-lg text-muted hover:bg-surface-3 hover:text-accent">
-                    <Icon name="image" size={20} />
+                  <button onClick={() => imgInput.current?.click()} title="ارسال تصویر (چند عکس)" aria-label="ارسال تصویر" className="flex h-9 w-9 items-center justify-center rounded-xl text-muted transition hover:bg-surface-2/80 hover:text-accent">
+                    <Icon name="image" size={19} />
                   </button>
                 )}
                 {me.permissions.includes("files.upload") && (
-                  <button onClick={() => fileInput.current?.click()} title="ارسال فایل (چند فایل)" aria-label="ارسال فایل" className="flex h-10 w-10 items-center justify-center rounded-lg text-muted hover:bg-surface-3 hover:text-accent">
-                    <Icon name="paperclip" size={20} />
+                  <button onClick={() => fileInput.current?.click()} title="ارسال فایل (چند فایل)" aria-label="ارسال فایل" className="flex h-9 w-9 items-center justify-center rounded-xl text-muted transition hover:bg-surface-2/80 hover:text-accent">
+                    <Icon name="paperclip" size={19} />
                   </button>
                 )}
                 <button
                   onClick={() => void startRecording()}
-                  disabled={sending}
                   title="ضبط پیام صوتی"
                   aria-label="ضبط پیام صوتی"
-                  className="flex h-10 w-10 items-center justify-center rounded-lg text-muted hover:bg-surface-3 hover:text-accent"
+                  className="flex h-9 w-9 items-center justify-center rounded-xl text-muted transition hover:bg-surface-2/80 hover:text-accent"
                 >
-                  <Icon name="mic" size={20} />
+                  <Icon name="mic" size={19} />
                 </button>
               </div>
               <textarea
                 ref={taRef}
                 value={text}
                 onChange={(e) => {
-                  setText(e.target.value);
+                  const val = e.target.value;
+                  setText(val);
+                  sendTypingSignal(Boolean(val.trim()));
                   e.target.style.height = "auto";
                   e.target.style.height = Math.min(e.target.scrollHeight, 160) + "px";
                 }}
+                onBlur={() => sendTypingSignal(false)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
@@ -1231,21 +2048,17 @@ export default function ChatView({
                   }
                 }}
                 rows={1}
-                placeholder="پیام خود را بنویسید..."
+                placeholder="پیام بنویسید..."
                 dir="auto"
-                className="max-h-40 min-h-10 flex-1 resize-none bg-transparent px-2 py-2 text-[15px] outline-none placeholder:text-muted/70"
+                className="max-h-40 min-h-9 flex-1 resize-none bg-transparent px-2 py-1.5 text-[14.5px] text-fg outline-none"
               />
               <button
                 onClick={send}
-                disabled={sending || (!text.trim() && !pending.length && !editing)}
-                className="grad-accent glow press flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-on-accent hover:brightness-110 disabled:opacity-40 disabled:shadow-none"
+                disabled={!text.trim() && !pending.length && !editing}
+                className="press flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-accent/50 bg-accent/22 text-accent shadow-[0_4px_16px_rgb(var(--glow)/0.22)] backdrop-blur-md transition hover:border-accent hover:bg-accent/32 disabled:border-line/50 disabled:bg-surface-2/50 disabled:text-muted disabled:opacity-45 disabled:shadow-none"
                 title="ارسال"
               >
-                {sending ? (
-                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
-                ) : (
-                  <Icon name="send" size={19} className="-scale-x-100" strokeWidth={2} />
-                )}
+                <Icon name="send" size={17} className="-scale-x-100" strokeWidth={2.1} />
               </button>
             </div>
             )}
@@ -1263,39 +2076,176 @@ export default function ChatView({
         )}
       </div>
 
-      {/* Info panel */}
+      {/* Info / User Profile Drawer */}
       {showInfo && detail && (
-        <aside className="anim-slide-panel fixed inset-0 z-40 flex w-full flex-col border-r border-line bg-surface pb-[env(safe-area-inset-bottom)] lg:static lg:z-auto lg:w-80 lg:shrink-0 lg:pb-0">
-          <div className="flex items-center justify-between border-b border-line px-4 py-3">
-            <h3 className="font-bold">اطلاعات</h3>
-            <button onClick={() => setShowInfo(false)} aria-label="بستن" className="flex h-9 w-9 items-center justify-center rounded-xl text-muted hover:bg-surface-2">
-              <Icon name="close" size={17} />
+        <aside className="anim-slide-panel fixed inset-0 z-40 flex w-full flex-col border-r border-line bg-surface pb-[env(safe-area-inset-bottom)] lg:static lg:z-auto lg:w-88 lg:shrink-0 lg:pb-0">
+          <div className="flex items-center justify-between border-b border-line px-4 py-2.5">
+            <h3 className="text-sm font-black text-fg">
+              {detail.type === "direct" ? "پروفایل کاربر" : detail.type === "saved" ? "فضای ابری من" : "اطلاعات گفتگو"}
+            </h3>
+            <button onClick={() => setShowInfo(false)} aria-label="بستن" className="flex h-8 w-8 items-center justify-center rounded-xl text-muted hover:bg-surface-2 hover:text-fg">
+              <Icon name="close" size={16} />
             </button>
           </div>
-          <div className="scroll-thin flex-1 space-y-5 overflow-y-auto p-4">
-            <div className="flex flex-col items-center text-center">
-              {detail.type === "saved" ? (
-                <span className="grad-accent flex h-[88px] w-[88px] items-center justify-center rounded-2xl text-on-accent shadow-md">
-                  <Icon name="bookmark" size={40} />
-                </span>
-              ) : detail.type === "direct" ? (
-                <Avatar name={detail.name} color={detail.peer?.avatarColor} lastSeenAt={detail.peer?.lastSeenAt} size={88} userId={detail.peer?.id} avatarFileId={detail.peer?.avatarFileId} />
-              ) : (
-                <Avatar name={detail.name} emoji={detail.emoji} size={88} />
-              )}
-              <h4 className="mt-3 text-lg font-black">{detail.name}</h4>
-              {detail.peer && (
-                <p className="text-sm text-accent" dir="ltr">
-                  @{detail.peer.username}
-                </p>
-              )}
-              {detail.description && <p className="mt-2 text-sm leading-6 text-muted">{detail.description}</p>}
-              {detail.type === "direct" && detail.peer && (
-                <Button variant="danger" onClick={() => blockUser(detail.peer.id, detail.name)} className="mt-4 w-full">
-                  <Icon name="ban" size={16} /> مسدود کردن کاربر
-                </Button>
-              )}
-            </div>
+          <div className="scroll-thin flex-1 space-y-4 overflow-y-auto p-3.5">
+            {detail.type === "direct" && detail.peer ? (() => {
+              const p = peerProfile || detail.peer;
+              const photos = peerProfile?.photos ?? [];
+              return (
+                <div className="space-y-3.5">
+                  {/* Pro Theme-Harmonized Profile Card */}
+                  <div className="overflow-hidden rounded-2xl border border-line bg-surface-2/65 shadow-sm">
+                    <div
+                      className="relative h-24 w-full overflow-hidden"
+                      style={{
+                        background: `radial-gradient(120% 120% at 85% 15%, ${p.avatarColor || "#8b5cf6"}55, transparent 62%), radial-gradient(100% 100% at 10% 90%, color-mix(in srgb, var(--accent) 42%, transparent), transparent 65%), var(--surface-3)`,
+                      }}
+                    >
+                      {peerProfile?.bannerFileId && (
+                        /* eslint-disable-next-line @next/next/no-img-element */
+                        <img
+                          src={`/api/banners/${p.id}?v=${peerProfile.bannerFileId}`}
+                          alt=""
+                          className="h-full w-full object-cover"
+                          onError={(e) => { e.currentTarget.style.display = "none"; }}
+                        />
+                      )}
+                      <div
+                        className="pointer-events-none absolute inset-0"
+                        style={{
+                          background: "linear-gradient(to top, color-mix(in srgb, var(--surface-2) 70%, transparent), transparent 55%)",
+                        }}
+                      />
+                    </div>
+                    <div className="relative flex flex-col items-center px-4 pb-4 text-center">
+                      <div className="-mt-10 rounded-2xl bg-surface p-1 shadow-lg ring-1 ring-line">
+                        <button
+                          type="button"
+                          disabled={!photos.length && !p.avatarFileId}
+                          onClick={() => (photos.length || p.avatarFileId) && setPeerGalleryIdx(0)}
+                          className="press relative block disabled:cursor-default"
+                        >
+                          <Avatar
+                            name={p.displayName || detail.name}
+                            color={p.avatarColor}
+                            lastSeenAt={detail.peer.lastSeenAt}
+                            size={82}
+                            userId={p.id}
+                            avatarFileId={p.avatarFileId}
+                            status={p.status}
+                          />
+                        </button>
+                      </div>
+                      <h4 className="mt-2.5 text-base font-black text-fg">{p.displayName || detail.name}</h4>
+                      <button
+                        type="button"
+                        dir="ltr"
+                        onClick={() => {
+                          void navigator.clipboard?.writeText(`@${p.username}`).then(() => toast("نام کاربری کپی شد", "success"));
+                        }}
+                        className="text-xs font-bold text-accent hover:underline"
+                      >
+                        @{p.username}
+                      </button>
+                      <div className="mt-1.5">
+                        <StatusLine status={p.status} text={p.statusText} emoji={p.statusEmoji} className="justify-center text-[11px]" />
+                      </div>
+                      {peerProfile?.roles?.length > 0 && (
+                        <div className="mt-2 flex flex-wrap justify-center gap-1">
+                          {peerProfile.roles.map((r) => (
+                            <span
+                              key={r.id}
+                              className="rounded-lg border px-2 py-0.5 text-[10px] font-bold"
+                              style={{
+                                background: `color-mix(in srgb, ${r.color} 15%, var(--surface))`,
+                                borderColor: `color-mix(in srgb, ${r.color} 38%, transparent)`,
+                                color: r.color,
+                              }}
+                            >
+                              {r.name}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Bio Card */}
+                  <div className="rounded-xl border border-line bg-surface-2/65 p-3">
+                    <p className="mb-1 text-[11px] font-bold text-muted">درباره</p>
+                    <p className="text-xs leading-6 text-fg">
+                      {peerProfile?.bio?.trim() ? peerProfile.bio : <span className="text-muted">بیوگرافی ثبت نشده است.</span>}
+                    </p>
+                  </div>
+
+                  {/* Metadata */}
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="rounded-xl border border-line bg-surface-2/60 p-2.5">
+                      <span className="block text-[10px] text-muted">آخرین بازدید</span>
+                      <span className="mt-0.5 block truncate text-xs font-bold text-fg">{subtitle || "—"}</span>
+                    </div>
+                    <div className="rounded-xl border border-line bg-surface-2/60 p-2.5">
+                      <span className="block text-[10px] text-muted">تاریخ عضویت</span>
+                      <span className="mt-0.5 block truncate text-xs font-bold text-fg">
+                        {peerProfile?.joinedAt ? new Date(peerProfile.joinedAt).toLocaleDateString("fa-IR") : "—"}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Quick Actions */}
+                  <div className="space-y-2 pt-1">
+                    <div className="grid grid-cols-2 gap-2">
+                      {me.permissions.includes("voice.join") && (
+                        <Button variant="soft" onClick={() => { setShowInfo(false); setShowVoice(true); }} className="!py-2 text-xs">
+                          <Icon name="phone" size={14} /> تماس صوتی
+                        </Button>
+                      )}
+                      <Button
+                        variant="ghost"
+                        onClick={() => {
+                          void navigator.clipboard?.writeText(`@${p.username}`).then(() => toast("نام کاربری کپی شد", "success"));
+                        }}
+                        className="!py-2 text-xs"
+                      >
+                        <Icon name="copy" size={14} /> کپی آیدی
+                      </Button>
+                    </div>
+
+                    {peerRelation === "none" && me.permissions.includes("friends.request") && (
+                      <Button
+                        variant="soft"
+                        onClick={async () => {
+                          try {
+                            const r = await apiFetch("/api/friends", { method: "POST", json: { username: p.username } });
+                            setPeerRelation(r.accepted ? "friend" : "outgoing");
+                            toast(r.accepted ? "اکنون دوست هستید" : "درخواست دوستی ارسال شد", "success");
+                          } catch (err) { toast(err.message, "error"); }
+                        }}
+                        className="w-full !py-2 text-xs"
+                      >
+                        <Icon name="user-plus" size={14} /> افزودن به دوستان
+                      </Button>
+                    )}
+
+                    <Button variant="danger" onClick={() => blockUser(p.id, detail.name)} className="w-full !py-2 text-xs">
+                      <Icon name="ban" size={15} /> مسدود کردن کاربر
+                    </Button>
+                  </div>
+                </div>
+              );
+            })() : (
+              <div className="flex flex-col items-center text-center">
+                {detail.type === "saved" ? (
+                  <span className="grad-accent flex h-20 w-20 items-center justify-center rounded-2xl text-on-accent shadow-md">
+                    <Icon name="bookmark" size={36} />
+                  </span>
+                ) : (
+                  <Avatar name={detail.name} emoji={detail.emoji} size={80} />
+                )}
+                <h4 className="mt-3 text-base font-black">{detail.name}</h4>
+                {detail.description && <p className="mt-1.5 text-xs leading-6 text-muted">{detail.description}</p>}
+              </div>
+            )}
 
             {detail.type !== "direct" && detail.type !== "saved" && (
               <>
@@ -1499,7 +2449,114 @@ export default function ChatView({
         </div>
       </Modal>
 
+      {/* Forward Message(s) Modal */}
+      <Modal
+        open={forwardModalIds.length > 0}
+        onClose={() => setForwardModalIds([])}
+        title={`فوروارد ${faNum(forwardModalIds.length)} پیام به گفتگوی دیگر`}
+      >
+        <div className="space-y-3">
+          <div className="relative">
+            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-muted">
+              <Icon name="search" size={15} />
+            </span>
+            <Input
+              placeholder="جستجو در گفتگوها و گروه‌ها…"
+              value={forwardSearch}
+              onChange={(e) => setForwardSearch(e.target.value)}
+              className="pr-9"
+            />
+          </div>
+
+          <div className="scroll-thin max-h-72 space-y-1.5 overflow-y-auto rounded-2xl border border-line bg-surface/60 p-2">
+            {/* Saved Messages quick option */}
+            <button
+              type="button"
+              onClick={() => setForwardIncludeSaved((v) => !v)}
+              className={`flex w-full items-center gap-3 rounded-xl border p-2 text-right transition ${
+                forwardIncludeSaved ? "border-accent bg-accent/15" : "border-transparent bg-surface-2 hover:border-line"
+              }`}
+            >
+              <span className="grad-accent flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-on-accent">
+                <Icon name="bookmark" size={16} />
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-xs font-black text-fg">پیام‌های ذخیره‌شده</p>
+                <p className="truncate text-[10.5px] text-muted">فضای ابری شخصی شما</p>
+              </div>
+              <span className={`flex h-5 w-5 items-center justify-center rounded-md border ${forwardIncludeSaved ? "border-accent bg-accent text-on-accent" : "border-line bg-surface"}`}>
+                {forwardIncludeSaved && <Icon name="check" size={12} strokeWidth={3} />}
+              </span>
+            </button>
+
+            {((convs && convs.length ? convs : localConvs) || [])
+              .filter((c) => c.type !== "saved" && (!forwardSearch || c.name.toLowerCase().includes(forwardSearch.toLowerCase())))
+              .map((c) => {
+                const on = forwardTargets.includes(c.id);
+                return (
+                  <button
+                    key={c.id}
+                    type="button"
+                    onClick={() =>
+                      setForwardTargets((prev) => (on ? prev.filter((x) => x !== c.id) : [...prev, c.id]))
+                    }
+                    className={`flex w-full items-center gap-3 rounded-xl border p-2 text-right transition ${
+                      on ? "border-accent bg-accent/15" : "border-transparent bg-surface-2 hover:border-line"
+                    }`}
+                  >
+                    {c.type === "direct" ? (
+                      <Avatar name={c.name} color={c.peer?.avatarColor} size={36} userId={c.peer?.id} avatarFileId={c.peer?.avatarFileId} />
+                    ) : (
+                      <Avatar name={c.name} emoji={c.emoji} size={36} />
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-xs font-black text-fg">{c.name}</p>
+                      <p className="truncate text-[10.5px] text-muted">
+                        {c.type === "direct" ? "گفتگوی خصوصی" : c.type === "group" ? "گروه خصوصی" : "اتاق عمومی"}
+                      </p>
+                    </div>
+                    <span className={`flex h-5 w-5 items-center justify-center rounded-md border ${on ? "border-accent bg-accent text-on-accent" : "border-line bg-surface"}`}>
+                      {on && <Icon name="check" size={12} strokeWidth={3} />}
+                    </span>
+                  </button>
+                );
+              })}
+          </div>
+
+          <div className="flex items-center gap-2 pt-1">
+            <Button variant="ghost" onClick={() => setForwardModalIds([])} className="flex-1">
+              انصراف
+            </Button>
+            <Button
+              onClick={() => void submitForward()}
+              disabled={forwardingBusy || (!forwardTargets.length && !forwardIncludeSaved)}
+              className="flex-1"
+            >
+              <Icon name="forward" size={15} />
+              {forwardingBusy
+                ? "در حال ارسال…"
+                : `ارسال${forwardTargets.length + (forwardIncludeSaved ? 1 : 0) > 0 ? ` (${faNum(forwardTargets.length + (forwardIncludeSaved ? 1 : 0))})` : ""}`}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
       <ContextMenu state={menu} onClose={closeMenu} />
+
+      {peerGalleryIdx !== null && (() => {
+        const singlePeerPhoto = peerProfile?.avatarFileId ?? peerProfile?.photos?.[0] ?? detail?.peer?.avatarFileId ?? null;
+        if (!singlePeerPhoto) return null;
+        return (
+          <Gallery
+            photos={[singlePeerPhoto]}
+            names={{ [singlePeerPhoto]: peerProfile?.displayName ?? detail?.name ?? "" }}
+            index={0}
+            onChange={() => {}}
+            onClose={() => setPeerGalleryIdx(null)}
+            owner={false}
+          />
+        );
+      })()}
 
       {lightbox && (() => {
         const lbIds = typeof lightbox === "object" ? lightbox.ids : [lightbox];
@@ -1579,20 +2636,28 @@ function MeetingInviteCard({ payload, mine }) {
   }
   if (!data.token) return <p className="px-4 py-2 text-xs opacity-70">دعوت‌نامهٔ جلسه</p>;
   return (
-    <div className={`m-2 rounded-lg border p-3 ${mine ? "border-white/25 bg-white/10" : "border-accent/30 bg-accent/10"}`}>
+    <div className="m-2 rounded-xl border border-accent/30 bg-accent/10 p-3">
       <div className="flex items-center gap-2.5">
-        <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${mine ? "bg-white/20 text-white" : "bg-accent/20 text-accent"}`}>
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-accent/18 text-accent">
           <Icon name="radio" size={19} />
         </span>
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-black">دعوت به جلسهٔ صوتی</p>
-          <p className="truncate text-[11px] opacity-80">{data.title}{data.host ? ` · میزبان: ${data.host}` : ""}</p>
+          <p className="truncate text-sm font-black text-fg">دعوت به جلسهٔ صوتی</p>
+          <p className="truncate text-[11px] text-muted">{data.title}{data.host ? ` · میزبان: ${data.host}` : ""}</p>
         </div>
       </div>
-      {data.lobby && <p className="mt-2 text-[10px] opacity-75">ورود با تأیید میزبان انجام می‌شود.</p>}
+      {data.invited ? (
+        <p className="mt-1.5 flex items-center gap-1 text-[10px] font-bold text-accent">
+          <Icon name="check" size={11} /> ورود مستقیم بدون انتظار در لابی
+        </p>
+      ) : (
+        data.lobby && <p className="mt-1.5 text-[10px] text-muted">ورود با تأیید میزبان انجام می‌شود.</p>
+      )}
       <button
         onClick={() => navigate(`/meet/${data.token}`)}
-        className={`press mt-2.5 flex w-full items-center justify-center gap-2 rounded-xl px-3 py-2 text-xs font-bold ${mine ? "bg-white/20 text-white hover:bg-white/30" : "grad-accent text-on-accent"}`}
+        className={`press mt-2.5 flex w-full items-center justify-center gap-2 rounded-xl px-3 py-2 text-xs font-bold ${
+          mine ? "border border-accent/40 bg-accent/20 text-accent hover:bg-accent/28" : "grad-accent text-on-accent"
+        }`}
       >
         <Icon name="phone" size={15} /> پیوستن به جلسه
       </button>
@@ -1612,70 +2677,84 @@ function makeSeededPeaks(seed, count = DEFAULT_WAVE_BARS) {
 }
 
 /** Advanced voice message player with decoded equalizer bars, mouse hover timestamp tooltip, click/drag scrub, and playback speed control. */
-function VoiceBubble({ fileId, duration, mine }) {
+function VoiceBubble({ fileId, localSrc, duration, mine }) {
   const audioRef = useRef(null);
   const trackRef = useRef(null);
-  const [src, setSrc] = useState("");
+  const [src, setSrc] = useState(localSrc || "");
   const [playing, setPlaying] = useState(false);
   const [pos, setPos] = useState(0);
   const [len, setLen] = useState(duration);
   const [rate, setRate] = useState(1);
-  const [peaks, setPeaks] = useState(() => makeSeededPeaks(fileId));
+  const [peaks, setPeaks] = useState(() => makeSeededPeaks(fileId || duration || 7));
   const [hoverRatio, setHoverRatio] = useState(null);
 
   useEffect(() => {
     let alive = true;
     let objectUrl = "";
+    const decodePeaksFromBlob = async (blob) => {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx || !blob) return;
+      let ctx;
+      try {
+        ctx = new Ctx();
+        const buf = await blob.arrayBuffer();
+        const decoded = await ctx.decodeAudioData(buf);
+        if (!alive) return;
+        if (decoded.duration && Number.isFinite(decoded.duration)) {
+          setLen(decoded.duration);
+        }
+        const channel = decoded.getChannelData(0);
+        const blockSize = Math.max(1, Math.floor(channel.length / DEFAULT_WAVE_BARS));
+        const raw = [];
+        let maxPeak = 0.01;
+        for (let i = 0; i < DEFAULT_WAVE_BARS; i++) {
+          let sum = 0;
+          const start = i * blockSize;
+          const end = Math.min(channel.length, start + blockSize);
+          const stride = Math.max(1, Math.floor((end - start) / 64));
+          let count = 0;
+          for (let j = start; j < end; j += stride) {
+            sum += Math.abs(channel[j]);
+            count++;
+          }
+          const avg = count ? sum / count : 0;
+          if (avg > maxPeak) maxPeak = avg;
+          raw.push(avg);
+        }
+        setPeaks(raw.map((v) => Math.max(0.16, Math.min(1, v / maxPeak))));
+      } catch {
+        /* keep seeded fallback peaks */
+      } finally {
+        void ctx?.close().catch(() => {});
+      }
+    };
+
+    if (!fileId && localSrc) {
+      setSrc(localSrc);
+      void fetch(localSrc)
+        .then((r) => (r.ok ? r.blob() : null))
+        .then((blob) => decodePeaksFromBlob(blob))
+        .catch(() => {});
+      return () => {
+        alive = false;
+      };
+    }
+    if (!fileId) return undefined;
+
     void authFetch(`/api/files/${fileId}`)
       .then((r) => (r.ok ? r.blob() : null))
       .then(async (blob) => {
         if (!alive || !blob) return;
         objectUrl = URL.createObjectURL(blob);
         setSrc(objectUrl);
-        // Decode real waveform peaks for equalizer bars
-        const Ctx = window.AudioContext || window.webkitAudioContext;
-        if (Ctx) {
-          let ctx;
-          try {
-            ctx = new Ctx();
-            const buf = await blob.arrayBuffer();
-            const decoded = await ctx.decodeAudioData(buf);
-            if (!alive) return;
-            if (decoded.duration && Number.isFinite(decoded.duration)) {
-              setLen(decoded.duration);
-            }
-            const channel = decoded.getChannelData(0);
-            const blockSize = Math.max(1, Math.floor(channel.length / DEFAULT_WAVE_BARS));
-            const raw = [];
-            let maxPeak = 0.01;
-            for (let i = 0; i < DEFAULT_WAVE_BARS; i++) {
-              let sum = 0;
-              const start = i * blockSize;
-              const end = Math.min(channel.length, start + blockSize);
-              const stride = Math.max(1, Math.floor((end - start) / 64));
-              let count = 0;
-              for (let j = start; j < end; j += stride) {
-                sum += Math.abs(channel[j]);
-                count++;
-              }
-              const avg = count ? sum / count : 0;
-              if (avg > maxPeak) maxPeak = avg;
-              raw.push(avg);
-            }
-            setPeaks(raw.map((v) => Math.max(0.16, Math.min(1, v / maxPeak))));
-          } catch {
-            /* keep seeded fallback peaks */
-          } finally {
-            void ctx?.close().catch(() => {});
-          }
-        }
+        await decodePeaksFromBlob(blob);
       })
       .catch(() => {});
     return () => {
       alive = false;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [fileId]);
+  }, [fileId, localSrc]);
 
   const totalSec = Math.max(len || duration || 0, 0.1);
   const progressRatio = Math.min(1, Math.max(0, pos / totalSec));
@@ -1708,10 +2787,10 @@ function VoiceBubble({ fileId, duration, mine }) {
     if (audioRef.current) audioRef.current.playbackRate = next;
   };
 
-  const sub = mine ? "text-white/80" : "text-muted";
-  const activeBarClass = mine ? "bg-white" : "bg-accent";
-  const hoverBarClass = mine ? "bg-white/65" : "bg-accent/55";
-  const idleBarClass = mine ? "bg-white/30" : "bg-fg/20";
+  const sub = mine ? "text-fg/75" : "text-muted";
+  const activeBarClass = "bg-accent";
+  const hoverBarClass = "bg-accent/55";
+  const idleBarClass = mine ? "bg-fg/25" : "bg-fg/20";
 
   return (
     <div className="flex min-w-[255px] max-w-[320px] items-center gap-2.5 px-3 pb-1 pt-2.5 sm:min-w-[285px]" dir="ltr">
@@ -1725,9 +2804,9 @@ function VoiceBubble({ fileId, duration, mine }) {
           else void el.play().catch(() => {});
         }}
         aria-label={playing ? "توقف پخش" : "پخش پیام صوتی"}
-        className={`press flex h-10 w-10 shrink-0 items-center justify-center rounded-full shadow-sm transition ${
-          mine ? "bg-white/25 text-white hover:bg-white/35" : "bg-accent/15 text-accent hover:bg-accent/25"
-        } ${!src ? "opacity-50" : ""}`}
+        className={`press flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-accent/30 bg-accent/18 text-accent shadow-sm transition hover:bg-accent/28 ${
+          !src ? "opacity-50" : ""
+        }`}
       >
         <Icon name={playing ? "pause" : "play"} size={17} />
       </button>
@@ -1789,9 +2868,7 @@ function VoiceBubble({ fileId, duration, mine }) {
               e.stopPropagation();
               cycleRate();
             }}
-            className={`rounded px-1.5 py-0.5 text-[9.5px] font-bold transition ${
-              mine ? "bg-white/20 text-white hover:bg-white/30" : "bg-surface-3 text-fg hover:bg-accent/20 hover:text-accent"
-            }`}
+            className="rounded border border-accent/25 bg-surface-3/80 px-1.5 py-0.5 text-[9.5px] font-bold text-fg transition hover:bg-accent/20 hover:text-accent"
             title="سرعت پخش"
           >
             {rate}x

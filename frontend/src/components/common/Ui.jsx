@@ -16,8 +16,21 @@ export function Avatar({
   avatarFileId,
   status,
 }) {
-  const showOnline = status ? status === "online" || status === "dnd" || status === "idle" : online ?? (lastSeenAt !== undefined ? isOnline(lastSeenAt) : false);
-  const dotColor = status ? STATUS_META[status].color : "#34d399";
+  const resolvedStatus = status
+    ? STATUS_META[status]
+      ? status
+      : "offline"
+    : online !== undefined
+      ? online
+        ? "online"
+        : "offline"
+      : lastSeenAt !== undefined
+        ? isOnline(lastSeenAt)
+          ? "online"
+          : "offline"
+        : null;
+  const showDot = resolvedStatus !== null;
+  const dotColor = resolvedStatus ? STATUS_META[resolvedStatus].color : "#22c55e";
   const dotSize = Math.max(10, size * 0.26);
   const initials = (name || "?").trim().slice(0, 1).toUpperCase();
   const photo = useAvatarUrl(userId, avatarFileId);
@@ -44,14 +57,15 @@ export function Avatar({
           initials
         )}
       </div>
-      {showOnline && (
+      {showDot && (
         <span
           className="absolute -bottom-0.5 -left-0.5 flex items-center justify-center rounded-full border-2 border-surface transition-colors duration-300"
           style={{ width: dotSize, height: dotSize, background: dotColor }}
-          title={status ? STATUS_META[status].label : "آنلاین"}
+          title={resolvedStatus ? STATUS_META[resolvedStatus].label : ""}
         >
-          {status === "dnd" && <span className="block rounded-full bg-surface" style={{ width: dotSize * 0.45, height: dotSize * 0.16 }} />}
-          {status === "idle" && <span className="block rounded-full border-surface" style={{ width: dotSize * 0.42, height: dotSize * 0.42, background: "var(--surface)" }} />}
+          {resolvedStatus === "dnd" && <span className="block rounded-full bg-white" style={{ width: dotSize * 0.48, height: dotSize * 0.16 }} />}
+          {resolvedStatus === "idle" && <span className="block rounded-full bg-surface" style={{ width: dotSize * 0.42, height: dotSize * 0.42 }} />}
+          {resolvedStatus === "offline" && <span className="block rounded-full bg-surface" style={{ width: dotSize * 0.4, height: dotSize * 0.4 }} />}
         </span>
       )}
     </div>
@@ -64,6 +78,9 @@ export function Modal({
   title,
   children,
   wide,
+  maxWidthClass,
+  bodyClassName,
+  noBodyScroll = false,
 }) {
   useEffect(() => {
     if (!open) return;
@@ -73,25 +90,33 @@ export function Modal({
   }, [open, onClose]);
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onMouseDown={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4" onMouseDown={onClose}>
       <div className="anim-fade-in absolute inset-0 bg-black/60 backdrop-blur-sm" />
       <div
         onMouseDown={(e) => e.stopPropagation()}
-        className={`anim-rise relative max-h-[90vh] w-full overflow-hidden rounded-xl border border-line bg-surface shadow-2xl ${
-          wide ? "max-w-2xl" : "max-w-md"
+        role="dialog"
+        aria-modal="true"
+        className={`anim-rise relative flex max-h-[92vh] w-full flex-col overflow-hidden rounded-2xl border border-line bg-surface/92 shadow-2xl backdrop-blur-2xl ${
+          maxWidthClass || (wide ? "max-w-2xl" : "max-w-md")
         }`}
       >
-        <div className="flex items-center justify-between border-b border-line px-6 py-4">
-          <h3 className="text-lg font-bold">{title}</h3>
+        <div className="flex shrink-0 items-center justify-between border-b border-line px-5 py-3.5 sm:px-6 sm:py-4">
+          <h3 className="text-base font-black sm:text-lg">{title}</h3>
           <button
             onClick={onClose}
-            className="flex h-9 w-9 items-center justify-center rounded-lg text-muted transition hover:bg-surface-2 hover:text-fg"
+            className="flex h-9 w-9 items-center justify-center rounded-xl text-muted transition hover:bg-surface-2 hover:text-fg"
             aria-label="بستن"
           >
             <Icon name="close" size={18} />
           </button>
         </div>
-        <div className="scroll-thin max-h-[calc(90vh-70px)] overflow-y-auto p-6">{children}</div>
+        <div
+          className={`min-h-0 flex-1 ${
+            noBodyScroll ? "overflow-hidden" : "scroll-thin overflow-y-auto"
+          } ${bodyClassName || "p-5 sm:p-6"}`}
+        >
+          {children}
+        </div>
       </div>
     </div>
   );
@@ -104,15 +129,15 @@ export function Button({
   ...props
 }) {
   const styles = {
-    primary: "grad-accent text-on-accent glow hover:brightness-110",
-    soft: "bg-accent/15 text-accent hover:bg-accent/25",
-    ghost: "bg-surface-2 text-fg hover:bg-surface-3",
-    danger: "bg-rose-500/15 text-rose-400 hover:bg-rose-500/25",
+    primary: "border border-accent/45 bg-accent/20 text-accent shadow-[0_6px_22px_rgb(var(--glow)/0.18)] backdrop-blur-md hover:bg-accent/30 hover:border-accent/65",
+    soft: "border border-accent/30 bg-accent/14 text-accent backdrop-blur-md hover:bg-accent/24",
+    ghost: "border border-line bg-surface-2/80 text-fg backdrop-blur-md hover:bg-surface-3",
+    danger: "border border-rose-400/35 bg-rose-500/15 text-rose-300 backdrop-blur-md hover:bg-rose-500/25 hover:border-rose-400/55",
   }[variant];
   return (
     <button
       {...props}
-      className={`press inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-50 ${styles} ${className}`}
+      className={`press inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold disabled:cursor-not-allowed disabled:opacity-45 ${styles} ${className}`}
     >
       {children}
     </button>
@@ -123,7 +148,7 @@ export function Input(props) {
   return (
     <input
       {...props}
-      className={`ring-glow w-full rounded-lg border border-line bg-surface-2 px-4 py-3 text-sm text-fg placeholder:text-muted/70 transition ${
+      className={`ring-glow w-full rounded-lg border border-line bg-surface-2 px-4 py-3 text-sm text-fg transition ${
         props.className || ""
       }`}
     />
@@ -140,16 +165,21 @@ export function Field({ label, children, hint }) {
   );
 }
 
-export function Empty({ icon, title, text }) {
+export function Empty({ icon, title, text, action }) {
   return (
-    <div className="flex items-center gap-4 px-6 py-10">
-      <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl bg-accent/10 text-accent">
-        <Icon name={icon} size={24} />
+    <div className="mx-1 my-4 flex flex-col items-center justify-center rounded-2xl border border-line/80 bg-gradient-to-b from-surface-2/65 via-surface/75 to-surface/40 px-5 py-8 text-center shadow-sm">
+      <div className="relative mb-3.5 flex h-16 w-16 items-center justify-center">
+        <span
+          className="pointer-events-none absolute inset-0 rounded-2xl blur-xl opacity-45"
+          style={{ background: "linear-gradient(135deg, var(--accent), var(--accent-2))" }}
+        />
+        <span className="relative flex h-14 w-14 items-center justify-center rounded-2xl border border-accent/30 bg-accent/15 text-accent shadow-inner">
+          <Icon name={icon} size={25} strokeWidth={1.8} />
+        </span>
       </div>
-      <div className="min-w-0">
-        <p className="font-bold">{title}</p>
-        {text && <p className="mt-1 max-w-xs text-sm leading-6 text-muted">{text}</p>}
-      </div>
+      <p className="text-sm font-black text-fg">{title}</p>
+      {text && <p className="mt-1.5 max-w-[230px] text-xs leading-6 text-muted">{text}</p>}
+      {action && <div className="mt-3.5">{action}</div>}
     </div>
   );
 }

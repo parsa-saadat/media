@@ -11,23 +11,58 @@ import { useConfirm } from "../components/common/Confirm";
 import { MicMeter, subscribeMicLevel } from "../utils/micMeter";
 import GamesPanel from "../components/meet/GamesPanel";
 import UserProfileModal from "../components/profile/UserProfileModal";
+import DraggablePiP from "../components/common/DraggablePiP";
+import AudioSettingsSection from "../components/common/AudioSettingsSection";
 
 const RESOLUTIONS = [
-  { id: "480p", label: "۴۸۰p", hint: "سبک — اینترنت ضعیف" },
-  { id: "720p", label: "۷۲۰p", hint: "تعادل کیفیت و سرعت" },
-  { id: "1080p", label: "۱۰۸۰p", hint: "بالاترین کیفیت" },
+  { id: "480p", label: "۴۸۰p", badge: "SD", res: "854×480", bitrate: "۱.۱Mbps", hint: "اینترنت ضعیف و مصرف کم" },
+  { id: "720p", label: "۷۲۰p", badge: "HD", res: "1280×720", bitrate: "۲.۸Mbps", hint: "تعادل عالی وضوح و سرعت" },
+  { id: "1080p", label: "۱۰۸۰p", badge: "FHD", res: "1920×1080", bitrate: "۶.۰Mbps", hint: "بالاترین وضوح کد و متن" },
 ];
-const FPS_OPTIONS = [30, 60];
+const FPS_OPTIONS = [
+  { value: 30, label: "۳۰ فریم", sub: "پایدار · متن و ارائه" },
+  { value: 60, label: "۶۰ فریم", sub: "فوق‌روان · ویدیو و بازی" },
+];
 
-/** Clean, predictable responsive grid class by headcount when no stage is pinned/shared. */
+/** Clean, predictable FULL-WIDTH responsive grid class by headcount when no stage is pinned/shared.
+ *  Participant cards always span the entire available stage width (even when count === 1).
+ */
 function adaptiveGridClass(count) {
-  if (count <= 1) return "grid-cols-1 max-w-4xl mx-auto w-full";
-  if (count === 2) return "grid-cols-1 md:grid-cols-2 max-w-6xl mx-auto w-full";
-  if (count <= 4) return "grid-cols-1 sm:grid-cols-2 max-w-6xl mx-auto w-full";
+  if (count <= 1) return "grid-cols-1 w-full";
+  if (count === 2) return "grid-cols-1 sm:grid-cols-2 w-full";
+  if (count === 3) return "grid-cols-1 sm:grid-cols-3 w-full";
+  if (count === 4) return "grid-cols-2 w-full";
   if (count <= 6) return "grid-cols-2 lg:grid-cols-3 w-full";
   if (count <= 9) return "grid-cols-2 md:grid-cols-3 w-full";
   return "grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 w-full";
 }
+
+const CONN_META = {
+  connecting: {
+    label: "در حال اتصال…",
+    short: "در حال اتصال…",
+    dot: "bg-amber-400 animate-pulse",
+    cls: "border-amber-400/40 bg-amber-500/18 text-amber-200",
+  },
+  connected: {
+    label: "متصل (مستقیم)",
+    short: "متصل",
+    dot: "bg-emerald-400",
+    cls: "border-emerald-400/40 bg-emerald-500/18 text-emerald-200",
+  },
+  relay: {
+    label: "متصل (رله صوتی)",
+    short: "متصل · رله",
+    dot: "bg-sky-400",
+    cls: "border-sky-400/40 bg-sky-500/18 text-sky-200",
+  },
+  reconnecting: {
+    label: "تلاش مجدد اتصال…",
+    short: "اتصال مجدد…",
+    dot: "bg-rose-400 animate-ping",
+    cls: "border-rose-400/40 bg-rose-500/18 text-rose-200",
+  },
+};
 
 function Elapsed({ since }) {
   const [now, setNow] = useState(() => Date.now());
@@ -40,31 +75,41 @@ function Elapsed({ since }) {
   return <span dir="ltr" className="tabular-nums">{h > 0 ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}` : `${m}:${String(s).padStart(2, "0")}`}</span>;
 }
 
-function Ctrl({ label, onClick, children, tone = "idle", disabled, title, onContextMenu }) {
+function Ctrl({ label, onClick, children, tone = "idle", disabled, title, onContextMenu, badge, pill = false }) {
   const look = {
-    idle: "bg-surface-2 text-fg hover:bg-surface-3 border-line",
-    on: "bg-emerald-500 text-[#0b2b1d] hover:bg-emerald-400 border-emerald-400/40",
-    off: "bg-[#ea4335] text-white hover:bg-[#ea4335]/90 border-rose-400/40",
-    warn: "bg-amber-400 text-[#3a2700] hover:bg-amber-300 border-amber-300/50",
+    idle: "bg-surface-2/85 text-fg/85 hover:bg-surface-3 hover:text-fg border-line",
+    on: "bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 border-emerald-400/45 shadow-[0_4px_18px_rgba(16,185,129,.18)]",
+    off: "bg-rose-500/20 text-rose-300 hover:bg-rose-500/30 border-rose-400/45 shadow-[0_4px_16px_rgba(244,63,94,.16)]",
+    warn: "bg-amber-400/20 text-amber-300 hover:bg-amber-400/30 border-amber-300/45 shadow-[0_4px_16px_rgba(251,191,36,.16)]",
+    accent: "bg-accent/20 text-accent hover:bg-accent/30 border-accent/50 shadow-[0_4px_18px_rgb(var(--glow)/0.2)]",
   }[tone];
   return (
     <button
+      type="button"
       onClick={onClick}
       onContextMenu={onContextMenu}
       disabled={disabled}
       aria-label={label}
       title={title ?? label}
-      className={`relative flex h-11 w-11 sm:h-12 sm:w-12 items-center justify-center rounded-xl border transition focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 disabled:cursor-not-allowed disabled:opacity-40 ${look}`}
+      className={`press relative flex h-11 items-center justify-center gap-1.5 rounded-2xl border backdrop-blur transition focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 disabled:cursor-not-allowed disabled:opacity-40 ${
+        pill ? "px-3.5 text-xs font-black" : "w-11"
+      } ${look}`}
     >
       {children}
+      {badge !== undefined && badge !== null && (
+        <span className="absolute -end-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full border border-accent/40 bg-surface-2 px-1 text-[9px] font-black text-accent ring-1 ring-line">
+          {badge}
+        </span>
+      )}
     </button>
   );
 }
 
 /**
- * Resolution + frame-rate picker. Anchored ABOVE its button; while active it also lets the user stop or switch settings.
+ * Anchored floating studio popover for Camera & Screen Share settings.
+ * Smooth spring-origin reveal directly above the dock button (no generic modal sheet!).
  */
-function MediaPopover({ open, title, quality, fps, onPick, onClose, active, onStop, stopLabel, icon, startLabel }) {
+function MediaPopover({ open, kind = "share", title, quality, fps, onPick, onClose, active, onStop, stopLabel, icon, startLabel }) {
   const [selQuality, setSelQuality] = useState(quality);
   const [selFps, setSelFps] = useState(fps);
   useEffect(() => {
@@ -74,49 +119,115 @@ function MediaPopover({ open, title, quality, fps, onPick, onClose, active, onSt
     }
   }, [open, quality, fps]);
   if (!open) return null;
+
+  const currentSpec = RESOLUTIONS.find((r) => r.id === selQuality) ?? RESOLUTIONS[1];
+
   return (
-    <div className="anim-rise absolute bottom-[calc(100%+10px)] left-1/2 z-30 w-[min(16rem,calc(100vw-1.5rem))] -translate-x-1/2 rounded-xl bg-surface-2 p-2.5 shadow-2xl ring-1 ring-line">
-      <p className="px-1 pb-2 text-[11px] font-bold text-muted">{title}</p>
-      <div className="mb-2 grid grid-cols-3 gap-1.5">
-        {RESOLUTIONS.map((q) => (
-          <button
-            key={q.id}
-            onClick={() => setSelQuality(q.id)}
-            aria-pressed={selQuality === q.id}
-            className={`rounded-lg px-2 py-2 text-center text-xs font-bold transition ${selQuality === q.id ? "bg-accent text-on-accent" : "bg-surface-3 text-fg/75 hover:bg-surface-2 hover:text-fg"}`}
-          >
-            {q.label}
-            <span className="mt-0.5 block text-[9px] font-normal opacity-70">{q.hint}</span>
-          </button>
-        ))}
+    <div
+      dir="rtl"
+      role="dialog"
+      aria-label={title}
+      onMouseDown={(e) => e.stopPropagation()}
+      style={{
+        animation: "dockPopoverIn .22s cubic-bezier(.16, 1, .3, 1) both",
+        transformOrigin: "bottom center",
+      }}
+      className="fixed inset-x-3 bottom-20 z-50 mx-auto w-auto max-w-[19.5rem] rounded-2xl border border-line/90 bg-surface/95 p-3.5 text-fg shadow-[0_22px_55px_rgba(0,0,0,.65)] backdrop-blur-2xl sm:absolute sm:inset-x-auto sm:bottom-[calc(100%+12px)] sm:left-1/2 sm:mx-0 sm:w-[19.5rem] sm:-translate-x-1/2"
+    >
+      <style>{`
+        @keyframes dockPopoverIn {
+          from { opacity: 0; transform: translateY(10px) scale(.94); }
+          to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        @media (min-width: 640px) {
+          @keyframes dockPopoverIn {
+            from { opacity: 0; transform: translateX(-50%) translateY(10px) scale(.94); }
+            to { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+          }
+        }
+      `}</style>
+
+      {/* Compact Studio Top Row */}
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <span className={`h-2 w-2 shrink-0 rounded-full ${active ? "animate-pulse bg-emerald-400" : "bg-accent"}`} />
+          <span className="truncate text-xs font-black text-fg">{title}</span>
+        </div>
+        <span dir="ltr" className="rounded-md border border-line bg-surface-2/90 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-muted">
+          {currentSpec.res} · {currentSpec.bitrate}
+        </span>
       </div>
-      <div className="grid grid-cols-2 gap-1.5">
-        {FPS_OPTIONS.map((f) => (
-          <button
-            key={f}
-            onClick={() => setSelFps(f)}
-            aria-pressed={selFps === f}
-            className={`rounded-lg px-2 py-2 text-center text-xs font-bold transition ${selFps === f ? "bg-accent text-on-accent" : "bg-surface-3 text-fg/75 hover:bg-surface-2 hover:text-fg"}`}
-          >
-            {faNum(f)} فریم بر ثانیه
-          </button>
-        ))}
+
+      {/* Segmented Resolution Track */}
+      <div className="mb-2.5">
+        <div className="grid grid-cols-3 gap-1 rounded-xl border border-line bg-surface-2/85 p-1">
+          {RESOLUTIONS.map((q) => {
+            const selected = selQuality === q.id;
+            return (
+              <button
+                key={q.id}
+                type="button"
+                onClick={() => setSelQuality(q.id)}
+                aria-pressed={selected}
+                className={`press flex flex-col items-center justify-center rounded-lg py-1.5 transition ${
+                  selected
+                    ? "border border-accent/45 bg-accent/18 text-accent shadow-sm"
+                    : "border border-transparent text-muted hover:text-fg"
+                }`}
+              >
+                <span className="text-xs font-black leading-4">{q.label}</span>
+                <span className="text-[9px] font-bold opacity-75">{q.badge}</span>
+              </button>
+            );
+          })}
+        </div>
       </div>
-      <button
-        onClick={() => { onPick(selQuality, selFps); onClose(); }}
-        className="grad-accent press mt-2 flex w-full items-center justify-center gap-1.5 rounded-lg py-2.5 text-xs font-black text-on-accent"
-      >
-        <Icon name={icon} size={14} /> {active ? "اعمال تنظیمات" : startLabel}
-      </button>
-      {active && (
+
+      {/* Segmented Frame-Rate Track */}
+      <div className="mb-3">
+        <div className="grid grid-cols-2 gap-1 rounded-xl border border-line bg-surface-2/85 p-1">
+          {FPS_OPTIONS.map((f) => {
+            const selected = selFps === f.value;
+            return (
+              <button
+                key={f.value}
+                type="button"
+                onClick={() => setSelFps(f.value)}
+                aria-pressed={selected}
+                className={`press flex items-center justify-center gap-1.5 rounded-lg py-1.5 text-xs font-bold transition ${
+                  selected
+                    ? "border border-accent/45 bg-accent/18 text-accent shadow-sm"
+                    : "border border-transparent text-muted hover:text-fg"
+                }`}
+              >
+                <span>{f.label}</span>
+                <span className="text-[9.5px] opacity-70">({f.value === 60 ? "روان" : "استاندارد"})</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Action Buttons */}
+      <div className="flex flex-col gap-1.5">
         <button
-          onClick={() => { onClose(); onStop(); }}
-          className="press mt-1.5 flex w-full items-center justify-center gap-1.5 rounded-lg bg-rose-500/90 py-2 text-xs font-bold text-white transition hover:bg-rose-500"
+          type="button"
+          onClick={() => { onPick(selQuality, selFps); onClose(); }}
+          className="press flex w-full items-center justify-center gap-1.5 rounded-xl border border-accent/45 bg-accent/20 py-2 text-xs font-black text-accent transition hover:bg-accent/30"
         >
-          <Icon name="close" size={14} /> {stopLabel}
+          <Icon name={icon} size={14} />
+          <span>{active ? `اعمال کیفیت ${selQuality} · ${faNum(selFps)}fps` : startLabel}</span>
         </button>
-      )}
-      <button onClick={onClose} className="mt-1 w-full rounded-lg py-1.5 text-[11px] text-muted hover:text-fg">بستن</button>
+        {active && (
+          <button
+            type="button"
+            onClick={() => { onClose(); onStop(); }}
+            className="press flex w-full items-center justify-center gap-1.5 rounded-xl border border-rose-400/35 bg-rose-500/15 py-1.5 text-[11px] font-bold text-rose-300 transition hover:bg-rose-500/25"
+          >
+            <Icon name="close" size={13} /> {stopLabel}
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -155,12 +266,45 @@ export default function Meet({ token, minimized = false, onMinimize, onExpand, o
   const [viewProfileId, setViewProfileId] = useState(null);
   const [roomFs, setRoomFs] = useState(false);
   const [streamFs, setStreamFs] = useState(false);
+  const [gameExpanded, setGameExpanded] = useState(false);
+  const [sideWidth, setSideWidth] = useState(() => {
+    const saved = Number(localStorage.getItem("inebuly-meet-side-w"));
+    return Number.isFinite(saved) && saved >= 290 && saved <= 640 ? saved : 370;
+  });
+  const [resizingSide, setResizingSide] = useState(false);
   const linkRef = useRef(null);
   const inviteRef = useRef(null);
   const cameraRef = useRef(null);
   const shareRef = useRef(null);
   const rootFsRef = useRef(null);
   const streamFsRef = useRef(null);
+
+  const startSideResize = (e) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = sideWidth;
+    setResizingSide(true);
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+
+    const onMove = (ev) => {
+      // In RTL, the side panel is at the inline-end (left side of screen).
+      // Dragging rightward (clientX increases) widens a left-docked panel!
+      const delta = ev.clientX - startX;
+      const next = Math.min(640, Math.max(290, startW + delta));
+      setSideWidth(next);
+      localStorage.setItem("inebuly-meet-side-w", String(next));
+    };
+    const onUp = () => {
+      setResizingSide(false);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
 
   useEffect(() => {
     const onFs = () => {
@@ -292,7 +436,7 @@ export default function Meet({ token, minimized = false, onMinimize, onExpand, o
   }, [hidden, inCall, meeting.joinToken, meeting.localScreen, meeting.streams]);
 
   // Determine what sits on the main stage:
-  // 1) An explicitly pinned stageTarget (screen or camera) if still valid
+  // 1) An explicitly pinned stageTarget ("screen" | "camera" | "user") if still valid
   // 2) Otherwise the first active screen share (unless user clicked minimize stage)
   const stage = useMemo(() => {
     if (stageMinimized) return null;
@@ -305,6 +449,10 @@ export default function Meet({ token, minimized = false, onMinimize, onExpand, o
         }
         if (stageTarget.kind === "camera" && (p.cameraOn || s.camera)) {
           return { kind: "camera", stream: s.camera, who: p };
+        }
+        if (stageTarget.kind === "user") {
+          if (p.cameraOn || s.camera) return { kind: "camera", stream: s.camera, who: p };
+          return { kind: "user", stream: null, who: p };
         }
       }
     }
@@ -323,12 +471,21 @@ export default function Meet({ token, minimized = false, onMinimize, onExpand, o
     }
   }, [activeScreenItems.length, stageTarget]);
 
-  // Every visible participant stays in the participant strip/grid!
-  // That way even when someone shares their screen, their camera/avatar tile ALSO remains visible simultaneously.
+  // Every visible participant in the call
   const visibleParticipants = useMemo(
     () => inCall.filter((p) => !hidden.has(p.joinToken)),
     [hidden, inCall],
   );
+
+  // When a user is spotlighted on stage (user/camera), push OTHER participants to the side strip
+  // (or if only 1 person is in call, keep strip empty so stage fills nicely).
+  // For screen share, keep everyone in the side strip so presenter's avatar/camera is also visible!
+  const stripParticipants = useMemo(() => {
+    if (!stage) return visibleParticipants;
+    if (stage.kind === "screen") return visibleParticipants;
+    const others = visibleParticipants.filter((p) => p.joinToken !== stage.who.joinToken);
+    return others;
+  }, [stage, visibleParticipants]);
 
   // Presenter's simultaneous camera stream for PiP badge inside the screen-share stage
   const presenterPiPCamera = useMemo(() => {
@@ -339,9 +496,12 @@ export default function Meet({ token, minimized = false, onMinimize, onExpand, o
   }, [stage, meeting.localCamera, meeting.streams]);
 
   async function enter(forceTakeover = false) {
-    const res = await meeting.join(name.trim(), { forceTakeover, silentConflict: true });
+    const res = await meeting.join(name.trim(), {
+      forceTakeover,
+      silentConflict: true,
+      micEnabled: joinWithMic && micPreview !== "blocked",
+    });
     if (res?.ok) {
-      if (joinWithMic && micPreview === "ready") window.setTimeout(() => void meeting.toggleMic(), 700);
       return;
     }
     if (res?.code === "BROWSER_SWITCH_CONFIRM") {
@@ -585,14 +745,31 @@ export default function Meet({ token, minimized = false, onMinimize, onExpand, o
     if (meeting.phase !== "joined" && meeting.phase !== "lobby") return null;
     const miniVideoStream = stage?.stream ?? (meeting.sharing ? meeting.localScreen : meeting.cameraOn ? meeting.localCamera : null);
     return (
-      <div
-        dir="rtl"
-        className="fixed bottom-4 end-4 z-50 flex w-[min(23.5rem,calc(100vw-2rem))] flex-col overflow-hidden rounded-2xl border border-accent/40 bg-[#12161d]/95 text-white shadow-[0_20px_50px_rgba(0,0,0,.78)] backdrop-blur-xl"
+      <DraggablePiP
+        storageKey="inebuly-meet-pip"
+        defaultCorner="bottom-right"
+        className="flex w-[min(22rem,calc(100vw-1.75rem))] flex-col overflow-hidden rounded-2xl border border-accent/45 bg-surface/92 text-fg shadow-[0_22px_55px_rgba(0,0,0,.45)] backdrop-blur-2xl"
       >
+        {/* Top drag bar */}
+        <div
+          data-pip-handle
+          className="flex items-center justify-between border-b border-line/80 bg-surface-2/75 px-3 py-1.5 text-[10px] text-muted"
+        >
+          <span className="flex items-center gap-1.5 font-bold">
+            <Icon name="move" size={11} className="text-accent" />
+            <span>برای جابه‌جایی بکشید</span>
+          </span>
+          {joinedAt > 0 && (
+            <span dir="ltr" className="font-mono font-bold text-accent">
+              <Elapsed since={joinedAt} />
+            </span>
+          )}
+        </div>
+
         {miniVideoStream && (
           <div
             onClick={() => (onExpand ? onExpand() : navigate(`/meet/${token}`))}
-            className="relative h-36 w-full cursor-pointer overflow-hidden border-b border-white/10 bg-black"
+            className="relative h-36 w-full cursor-pointer overflow-hidden border-b border-line bg-black"
           >
             <Stage
               stream={miniVideoStream}
@@ -600,29 +777,28 @@ export default function Meet({ token, minimized = false, onMinimize, onExpand, o
               kind={stage?.kind ?? "screen"}
               mirrored={Boolean(stage?.kind === "camera" && stage?.who?.joinToken === meeting.joinToken)}
             />
-            <span className="absolute start-2 top-2 rounded-md bg-black/65 px-2 py-0.5 text-[10px] font-bold text-white backdrop-blur">
-              برای بازگشت به جلسه کلیک کنید
+            <span className="absolute bottom-2 start-2 rounded-md border border-line/60 bg-surface/85 px-2 py-0.5 text-[10px] font-bold text-fg backdrop-blur">
+              {stage?.kind === "camera" ? "تصویر کمرا" : "اشتراک صفحه"} · کلیک برای بزرگ‌نمایی
             </span>
           </div>
         )}
-        <div className="flex items-center gap-2.5 p-2.5">
+        <div className="flex items-center gap-2 p-2.5">
           <button
             type="button"
             onClick={() => (onExpand ? onExpand() : navigate(`/meet/${token}`))}
             title="بازگشت به صفحهٔ کامل جلسه"
-            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-accent/20 text-accent ring-1 ring-accent/35 transition hover:bg-accent/30"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-accent/35 bg-accent/18 text-accent transition hover:bg-accent/28"
           >
-            <Icon name="radio" size={18} />
+            <Icon name="radio" size={17} />
           </button>
           <div
             onClick={() => (onExpand ? onExpand() : navigate(`/meet/${token}`))}
             className="min-w-0 flex-1 cursor-pointer select-none"
           >
-            <p className="truncate text-xs font-black text-white">{info?.title ?? "جلسهٔ فعال"}</p>
-            <p className="flex items-center gap-1.5 text-[10px] text-emerald-300">
-              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+            <p className="truncate text-xs font-black text-fg">{info?.title ?? "جلسهٔ فعال"}</p>
+            <p className="flex items-center gap-1.5 text-[10px] font-semibold text-accent">
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
               <span>{meeting.phase === "lobby" ? "در انتظار تأیید لابی" : `${faNum(inCall.length)} نفر در جلسه`}</span>
-              {joinedAt > 0 && <span dir="ltr" className="text-white/60">· <Elapsed since={joinedAt} /></span>}
             </p>
           </div>
           {meeting.phase === "joined" && (
@@ -631,37 +807,39 @@ export default function Meet({ token, minimized = false, onMinimize, onExpand, o
               disabled={meeting.myState.micMuted}
               onClick={() => void meeting.toggleMic()}
               title={meeting.micOn ? "خاموش کردن میکروفون" : "روشن کردن میکروفون"}
-              className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl transition disabled:opacity-40 ${
-                meeting.micOn ? "bg-emerald-500 text-[#072316]" : "bg-[#ea4335] text-white"
+              className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border transition disabled:opacity-40 ${
+                meeting.micOn
+                  ? "border-emerald-500/45 bg-emerald-500/20 text-emerald-500"
+                  : "border-rose-500/45 bg-rose-500/20 text-rose-500"
               }`}
             >
-              <Icon name={meeting.micOn ? "mic" : "mic-off"} size={16} />
+              <Icon name={meeting.micOn ? "mic" : "mic-off"} size={15} />
             </button>
           )}
           <button
             type="button"
             onClick={() => (onExpand ? onExpand() : navigate(`/meet/${token}`))}
             title="باز کردن کامل جلسه"
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-white/10 text-white hover:bg-white/20"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-line bg-surface-2 text-fg hover:bg-surface-3"
           >
-            <Icon name="maximize" size={15} />
+            <Icon name="maximize" size={14} />
           </button>
           <button
             type="button"
             onClick={() => void meeting.leave().then(() => onTerminated?.())}
             title="خروج از جلسه"
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-rose-500/90 text-white hover:bg-rose-500"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-rose-500/45 bg-rose-500/20 text-rose-500 hover:bg-rose-500/30"
           >
-            <Icon name="phone-off" size={15} />
+            <Icon name="phone-off" size={14} />
           </button>
         </div>
-      </div>
+      </DraggablePiP>
     );
   }
 
   if (notFound) {
     return (
-      <div className="flex min-h-[100dvh] flex-col items-center justify-center gap-4 bg-bg p-6 text-center text-fg">
+      <div className="fixed inset-0 z-40 flex flex-col items-center justify-center gap-4 overflow-y-auto bg-bg p-6 text-center text-fg">
         <span className="flex h-14 w-14 items-center justify-center rounded-xl bg-surface-2 text-rose-400"><Icon name="ban" size={28} /></span>
         <h1 className="text-xl font-black">جلسه در دسترس نیست</h1>
         <p className="max-w-sm text-sm leading-7 text-muted">{notFound}</p>
@@ -674,7 +852,7 @@ export default function Meet({ token, minimized = false, onMinimize, onExpand, o
   if (meeting.phase !== "joined") {
     const waiting = meeting.phase === "lobby";
     return (
-      <div className="anim-surface-in flex min-h-[100dvh] flex-col overflow-y-auto bg-bg text-fg">
+      <div className="anim-surface-in fixed inset-0 z-40 flex flex-col overflow-x-hidden overflow-y-auto bg-bg text-fg">
         <div className="flex items-center gap-3 border-b border-line px-4 py-3 sm:px-6">
           <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-accent/10 text-accent"><Icon name="radio" size={18} /></span>
           <div className="min-w-0">
@@ -727,41 +905,25 @@ export default function Meet({ token, minimized = false, onMinimize, onExpand, o
               </button>
             </div>
             {showDevices && (
-              <div className="grid gap-3 border-t border-line bg-bg/70 p-4 text-xs backdrop-blur sm:grid-cols-2">
-                <label className="block">
-                  <span className="mb-1 block font-bold text-muted">میکروفون</span>
-                  <select
-                    value={meeting.prefs.inputId}
-                    onChange={(e) => void meeting.changeInput(e.target.value).then(() => meeting.previewMic().then((ok) => setMicPreview(ok ? "ready" : "blocked")))}
-                    className="w-full rounded-lg bg-surface-2 px-3 py-2 text-fg outline-none ring-1 ring-line"
-                  >
-                    <option value="">پیش‌فرض سیستم</option>
-                    {meeting.devices.filter((d) => d.kind === "audioinput" && d.deviceId && d.deviceId !== "default").map((d, i) => (
-                      <option key={d.deviceId} value={d.deviceId}>{d.label || `میکروفون ${i + 1}`}</option>
-                    ))}
-                  </select>
-                </label>
-                <label className="block">
-                  <span className="mb-1 block font-bold text-muted">بلندگو</span>
-                  <select
-                    value={meeting.prefs.outputId}
-                    onChange={(e) => void meeting.changeOutput(e.target.value)}
-                    className="w-full rounded-lg bg-surface-2 px-3 py-2 text-fg outline-none ring-1 ring-line"
-                  >
-                    <option value="">پیش‌فرض سیستم</option>
-                    {meeting.devices.filter((d) => d.kind === "audiooutput" && d.deviceId && d.deviceId !== "default").map((d, i) => (
-                      <option key={d.deviceId} value={d.deviceId}>{d.label || `خروجی ${i + 1}`}</option>
-                    ))}
-                  </select>
-                </label>
-                <label className="block sm:col-span-2">
-                  <span className="mb-1 block font-bold text-muted">بلندی صدای میکروفون من</span>
-                  <div className="flex items-center gap-3">
-                    <Icon name="mic" size={14} className="shrink-0 text-muted" />
-                    <input type="range" min={0} max={200} value={meeting.prefs.micGain} onChange={(e) => meeting.setMicGain(Number(e.target.value))} aria-label="بلندی میکروفون من" className="h-1.5 min-w-0 flex-1 accent-[var(--accent)]" />
-                    <span className="w-12 text-left tabular-nums text-muted">{faNum(meeting.prefs.micGain)}٪</span>
-                  </div>
-                </label>
+              <div className="scroll-thin max-h-[52vh] overflow-y-auto border-t border-line bg-bg/85 p-4 backdrop-blur-xl">
+                <AudioSettingsSection
+                  compact
+                  showAppSounds={false}
+                  externalCall={{
+                    prefs: meeting.prefs,
+                    devices: meeting.devices,
+                    micActive: joinWithMic && micPreview === "ready",
+                    updateAudioPrefs: meeting.updateAudioPrefs,
+                    changeInput: async (id) => {
+                      await meeting.changeInput(id);
+                      const ok = await meeting.previewMic();
+                      setMicPreview(ok ? "ready" : "blocked");
+                    },
+                    changeOutput: meeting.changeOutput,
+                    setMicGain: meeting.setMicGain,
+                    setMaster: meeting.setMaster,
+                  }}
+                />
               </div>
             )}
           </section>
@@ -793,7 +955,7 @@ export default function Meet({ token, minimized = false, onMinimize, onExpand, o
                       onKeyDown={(e) => { if (e.key === "Enter" && meeting.phase !== "connecting") void enter(); }}
                       maxLength={32}
                       placeholder="نام دلخواه خود را بنویسید…"
-                      className="w-full rounded-lg border border-line bg-surface-2 px-3.5 py-2.5 text-sm text-fg outline-none placeholder:text-muted/70 focus:border-accent"
+                      className="w-full rounded-lg border border-line bg-surface-2 px-3.5 py-2.5 text-sm text-fg outline-none focus:border-accent"
                     />
                   </label>
                 )}
@@ -801,12 +963,12 @@ export default function Meet({ token, minimized = false, onMinimize, onExpand, o
                   <button
                     onClick={() => void enter()}
                     disabled={meeting.phase === "connecting"}
-                    className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-accent px-6 py-3 text-sm font-bold text-on-accent shadow-lg transition hover:brightness-110 disabled:opacity-60"
+                    className="press flex flex-1 items-center justify-center gap-2 rounded-xl border border-accent/50 bg-accent/22 px-6 py-3 text-sm font-black text-accent shadow-[0_8px_28px_rgb(var(--glow)/0.22)] backdrop-blur-xl transition hover:border-accent hover:bg-accent/32 disabled:opacity-55"
                   >
-                    {meeting.phase === "connecting" ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-on-accent/40 border-t-on-accent" /> : <Icon name="phone" size={18} />}
+                    {meeting.phase === "connecting" ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-accent/35 border-t-accent" /> : <Icon name="video" size={18} />}
                     {meeting.phase === "connecting" ? "در حال ورود…" : "پیوستن به جلسه"}
                   </button>
-                  <button onClick={() => { onTerminated?.(); navigate(me ? "/" : "/login"); }} className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-line bg-surface-2 px-6 py-3 text-sm font-bold text-fg hover:bg-surface-3">
+                  <button onClick={() => { onTerminated?.(); navigate(me ? "/" : "/login"); }} className="press flex flex-1 items-center justify-center gap-2 rounded-xl border border-line bg-surface-2/80 px-6 py-3 text-sm font-bold text-fg backdrop-blur-md hover:bg-surface-3">
                     بازگشت
                   </button>
                 </div>
@@ -821,17 +983,44 @@ export default function Meet({ token, minimized = false, onMinimize, onExpand, o
   /* ── in the meeting ── */
   return (
     <div ref={rootFsRef} className="anim-surface-in fixed inset-0 z-40 flex flex-col overflow-hidden bg-bg text-fg">
-      {/* Header */}
-      <header className="relative z-30 flex shrink-0 items-center gap-3 border-b border-line bg-surface px-3 py-2 sm:px-5">
-        <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-accent/10 text-accent"><Icon name="radio" size={18} /></span>
-        <div className="min-w-0">
-          <p className="truncate text-sm font-bold leading-5">{info?.title ?? "جلسه"}</p>
-          <p className="truncate text-[10px] text-muted" dir="ltr">inebuly · <Elapsed since={joinedAt} /></p>
+      {/* Header — Clean redesigned top-right with live connection status */}
+      <header className="relative z-30 flex shrink-0 items-center gap-3 border-b border-line bg-surface/85 px-3.5 py-2 backdrop-blur-xl sm:px-5">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-emerald-400/30 bg-emerald-500/12 px-2.5 py-1 text-[11px] font-bold text-emerald-300">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+            <span dir="ltr" className="tabular-nums"><Elapsed since={joinedAt} /></span>
+          </span>
+          {(() => {
+            const cMeta = CONN_META[meeting.myConnState] || CONN_META.connecting;
+            return (
+              <span
+                title="وضعیت اتصال صوتی و تصویری شما"
+                className={`inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10.5px] font-bold backdrop-blur-md ${cMeta.cls}`}
+              >
+                <span className={`h-1.5 w-1.5 rounded-full ${cMeta.dot}`} />
+                <span>{cMeta.label}</span>
+              </span>
+            );
+          })()}
+          <div className="hidden h-4 w-px bg-line/80 sm:block" />
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <p className="truncate text-sm font-black leading-5 text-fg">{info?.title ?? "جلسه"}</p>
+              <span className="shrink-0 rounded-md border border-line bg-surface-2/90 px-1.5 py-0.5 text-[10px] font-bold text-muted">
+                {faNum(inCall.length)} نفر
+              </span>
+              {meeting.lobbyEnabled && (
+                <span className="hidden shrink-0 rounded-md border border-amber-400/30 bg-amber-400/12 px-1.5 py-0.5 text-[10px] font-bold text-amber-300 sm:inline">
+                  لابی فعال
+                </span>
+              )}
+            </div>
+          </div>
         </div>
 
         {/* Active shares switcher bar when multiple shares exist or stage was minimized */}
         {(activeScreenItems.length > 1 || (stageMinimized && activeScreenItems.length > 0)) && (
-          <div className="hidden items-center gap-1.5 md:flex ms-3">
+          <div className="ms-1 hidden items-center gap-1.5 md:flex">
             {activeScreenItems.map((item) => {
               const isCurrent = stage?.kind === "screen" && stage?.who.joinToken === item.token;
               return (
@@ -841,7 +1030,11 @@ export default function Meet({ token, minimized = false, onMinimize, onExpand, o
                     setStageMinimized(false);
                     setStageTarget({ token: item.token, kind: "screen" });
                   }}
-                  className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[11px] font-bold transition ${isCurrent ? "bg-accent text-on-accent" : "bg-surface-2 text-muted hover:text-fg"}`}
+                  className={`flex items-center gap-1.5 rounded-xl border px-2.5 py-1 text-[11px] font-bold transition ${
+                    isCurrent
+                      ? "border-accent/45 bg-accent/18 text-accent shadow-sm"
+                      : "border-line bg-surface-2 text-muted hover:text-fg"
+                  }`}
                 >
                   <Icon name="screen" size={12} />
                   <span>صفحهٔ {item.token === meeting.joinToken ? "شما" : item.who.name}</span>
@@ -851,36 +1044,57 @@ export default function Meet({ token, minimized = false, onMinimize, onExpand, o
           </div>
         )}
 
-        <div className="ms-auto flex items-center gap-2">
+        <div className="ms-auto flex items-center gap-1.5 sm:gap-2">
           {meeting.amHost && lobby.length > 0 && (
-            <button onClick={() => setPanel("people")} className="flex items-center gap-1.5 rounded-lg bg-amber-400/15 px-2.5 py-1.5 text-[11px] font-bold text-amber-400">
+            <button
+              onClick={() => setPanel("people")}
+              className="press flex items-center gap-1.5 rounded-xl border border-amber-400/35 bg-amber-400/15 px-2.5 py-1.5 text-[11px] font-black text-amber-300"
+            >
               <Icon name="clock" size={13} /> {faNum(lobby.length)} در انتظار
             </button>
           )}
           {meeting.game && (
-            <button onClick={() => setPanel("games")} className="flex items-center gap-1.5 rounded-lg bg-accent/20 px-2.5 py-1.5 text-[11px] font-bold text-accent">
-              <Icon name="gamepad" size={13} /> {meeting.game.label}
+            <button
+              onClick={() => setPanel("games")}
+              className="press flex items-center gap-1.5 rounded-xl border border-accent/35 bg-accent/15 px-2.5 py-1.5 text-[11px] font-bold text-accent"
+            >
+              <Icon name="gamepad" size={13} /> <span className="hidden sm:inline">{meeting.game.label}</span>
             </button>
           )}
-          <span className="rounded-lg bg-surface-2 px-2.5 py-1 text-[11px] font-semibold text-muted">{faNum(inCall.length)} نفر</span>
+
+          {meeting.amHost && (
+            <button
+              type="button"
+              onClick={() => void meeting.setLobby(!meeting.lobbyEnabled)}
+              title={meeting.lobbyEnabled ? "لابی فعال است (کلیک برای ورود آزاد همه)" : "ورود آزاد فعال است (کلیک برای فعال‌سازی لابی تأیید)"}
+              className={`press hidden items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-[11px] font-bold transition lg:flex ${
+                meeting.lobbyEnabled
+                  ? "border-amber-400/40 bg-amber-400/15 text-amber-300"
+                  : "border-emerald-400/30 bg-emerald-500/12 text-emerald-300 hover:bg-emerald-500/20"
+              }`}
+            >
+              <Icon name={meeting.lobbyEnabled ? "lock" : "check"} size={13} />
+              <span>{meeting.lobbyEnabled ? "لابی تأیید: روشن" : "ورود مستقیم: آزاد"}</span>
+            </button>
+          )}
 
           <button
             type="button"
             onClick={() => minimizeToApp()}
-            aria-label="ورود به برنامه (کوچک‌کردن جلسه)"
-            title="ورود به فضای چت و برنامه بدون قطع شدن جلسه"
-            className="press flex h-9 items-center gap-1.5 rounded-lg border border-line bg-surface-2 px-2.5 text-[11px] font-bold text-fg transition hover:border-accent/50 hover:bg-surface-3"
+            aria-label="کوچک‌نمایی جلسه"
+            title="کوچک‌نمایی جلسه و بازگشت به چت"
+            className="press flex h-9 items-center gap-1.5 rounded-xl border border-line bg-surface-2 px-2.5 text-[11px] font-bold text-fg transition hover:border-accent/50 hover:bg-surface-3"
           >
             <Icon name="pip" size={15} className="text-accent" />
-            <span className="hidden sm:inline">فضای برنامه</span>
+            <span className="hidden sm:inline">کوچک‌نمایی</span>
           </button>
 
           <button
             type="button"
             onClick={() => void toggleFullscreen(rootFsRef.current)}
             aria-label={roomFs ? "خروج از تمام‌صفحه" : "تمام‌صفحهٔ جلسه"}
-            title={roomFs ? "خروج از تمام‌صفحه" : "تمام‌صفحه کردن کل جلسه"}
-            className="press flex h-9 w-9 items-center justify-center rounded-lg border border-line bg-surface-2 text-muted transition hover:bg-surface-3 hover:text-fg"
+            title={roomFs ? "خروج از تمام‌صفحه" : "تمام‌صفحه کردن جلسه"}
+            className="press flex h-9 w-9 items-center justify-center rounded-xl border border-line bg-surface-2 text-muted transition hover:bg-surface-3 hover:text-fg"
           >
             <Icon name={roomFs ? "minimize" : "maximize"} size={15} />
           </button>
@@ -891,18 +1105,25 @@ export default function Meet({ token, minimized = false, onMinimize, onExpand, o
               aria-label="لینک جلسه"
               aria-expanded={linkOpen}
               title="لینک جلسه"
-              className={`flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-[11px] font-bold transition ${linkOpen ? "bg-surface-3 text-fg" : "text-muted hover:bg-surface-2 hover:text-fg"}`}
+              className={`press flex h-9 items-center gap-1.5 rounded-xl border px-2.5 text-[11px] font-bold transition ${
+                linkOpen ? "border-accent/50 bg-accent/15 text-accent" : "border-line bg-surface-2 text-muted hover:text-fg"
+              }`}
             >
-              <Icon name="link" size={15} /> <span className="hidden sm:inline">لینک</span>
+              <Icon name="link" size={14} /> <span className="hidden md:inline">لینک</span>
             </button>
             {linkOpen && (
-              <div className="anim-rise absolute end-0 top-11 z-30 w-[min(88vw,23rem)] rounded-xl bg-surface-2 p-3 shadow-2xl ring-1 ring-line">
-                <p className="mb-2 flex items-center gap-1.5 text-xs font-bold text-fg/85"><Icon name="link" size={14} className="text-accent" /> لینک ورود به جلسه</p>
-                <input readOnly dir="ltr" value={meetingLink} onFocus={(e) => e.currentTarget.select()} aria-label="لینک جلسه" className="w-full rounded-lg bg-surface px-3 py-2 font-mono text-[11px] text-fg/85 outline-none ring-1 ring-line" />
-                <p className="mt-2 text-[10px] leading-5 text-muted">هر فردی با این لینک می‌تواند وارد شود{info?.lobby ? " و در لابی منتظر تأیید میزبان بماند" : ""}.</p>
-                <div className="mt-2.5 flex gap-2">
-                  <button onClick={() => void copyLink()} className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-accent px-3 py-2 text-xs font-bold text-on-accent hover:brightness-110"><Icon name="copy" size={14} /> کپی لینک</button>
-                  <button onClick={() => window.open(meetingLink, "_blank", "noopener")} className="flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-xs font-bold text-fg/75 ring-1 ring-line hover:bg-surface-3"><Icon name="globe" size={14} /> تب جدید</button>
+              <div className="anim-rise absolute end-0 top-11 z-30 w-[min(88vw,22rem)] rounded-2xl border border-line bg-surface p-3.5 shadow-2xl backdrop-blur-xl">
+                <p className="mb-2 flex items-center gap-1.5 text-xs font-black text-fg"><Icon name="link" size={14} className="text-accent" /> لینک ورود به جلسه</p>
+                <input readOnly dir="ltr" value={meetingLink} onFocus={(e) => e.currentTarget.select()} aria-label="لینک جلسه" className="w-full rounded-xl border border-line bg-surface-2 px-3 py-2 font-mono text-[11px] text-fg/90 outline-none" />
+                <p className="mt-2 text-[10px] leading-5 text-muted">
+                  {meeting.lobbyEnabled
+                    ? "لابی روشن است: افراد دارای لینک منتظر تأیید شما می‌مانند (دعوت‌شدگان مستقیم وارد می‌شوند)."
+                    : "ورود مستقیم فعال است: هر فرد با این لینک بدون انتظار وارد جلسه می‌شود."}
+                </p>
+                <div className="mt-2.5">
+                  <button onClick={() => void copyLink()} className="press flex w-full items-center justify-center gap-1.5 rounded-xl border border-accent/45 bg-accent/18 px-3 py-2 text-xs font-black text-accent hover:bg-accent/28">
+                    <Icon name="copy" size={14} /> کپی لینک جلسه
+                  </button>
                 </div>
               </div>
             )}
@@ -915,14 +1136,14 @@ export default function Meet({ token, minimized = false, onMinimize, onExpand, o
                 onClick={() => { setInviteOpen((v) => !v); setLinkOpen(false); if (!inviteOpen) void openInvite(); }}
                 aria-label="دعوت از دوستان"
                 aria-expanded={inviteOpen}
-                title="دعوت از دوستان"
-                className={`press flex h-9 items-center gap-1.5 rounded-lg px-3 text-xs font-bold shadow-sm transition ${
+                title="دعوت مستقیم دوستان (بدون انتظار در لابی)"
+                className={`press flex h-9 items-center gap-1.5 rounded-xl border px-3 text-xs font-black transition ${
                   inviteOpen
-                    ? "grad-accent text-on-accent ring-2 ring-accent/40"
-                    : "border border-accent/50 bg-accent/20 text-fg hover:bg-accent hover:text-on-accent"
+                    ? "border-accent/60 bg-accent/25 text-accent"
+                    : "border-accent/45 bg-accent/16 text-accent hover:bg-accent/25"
                 }`}
               >
-                <Icon name="user-plus" size={15} /> <span className="hidden sm:inline">دعوت دوستان</span>
+                <Icon name="user-plus" size={14} /> <span className="hidden sm:inline">دعوت</span>
               </button>
             </div>
           )}
@@ -932,42 +1153,42 @@ export default function Meet({ token, minimized = false, onMinimize, onExpand, o
       {inviteOpen && typeof document !== "undefined" && createPortal(
         <div
           dir="rtl"
-          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4"
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm"
           onMouseDown={() => setInviteOpen(false)}
         >
           <div
-            className="flex max-h-[80vh] w-full max-w-md flex-col overflow-hidden rounded-xl border border-line bg-surface text-fg shadow-[0_28px_70px_rgba(0,0,0,.85)]"
+            className="anim-pop flex max-h-[80vh] w-full max-w-md flex-col overflow-hidden rounded-2xl border border-line bg-surface/90 text-fg shadow-[0_28px_70px_rgba(0,0,0,.75)] backdrop-blur-2xl"
             onMouseDown={(e) => e.stopPropagation()}
             role="dialog"
             aria-modal="true"
             aria-label="دعوت از دوستان"
           >
-            <div className="flex items-center gap-3 border-b border-line bg-surface-2 px-4 py-3.5">
-              <span className="grad-accent flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-on-accent shadow-sm">
+            <div className="flex items-center gap-3 border-b border-line/75 bg-surface-2/60 px-4 py-3.5">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-accent/40 bg-accent/18 text-accent shadow-sm">
                 <Icon name="user-plus" size={18} />
               </span>
               <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-black text-fg">دعوت از دوستان</p>
-                <p className="truncate text-xs text-muted">کارت دعوت مستقیم به گفتگوی خصوصی دوستتان ارسال می‌شود</p>
+                <p className="truncate text-sm font-black text-fg">دعوت مستقیم دوستان</p>
+                <p className="truncate text-[11px] text-muted">ارسال کارت ورود مستقیم به گفتگو</p>
               </div>
               <button
                 type="button"
                 onClick={() => setInviteOpen(false)}
                 aria-label="بستن"
-                className="flex h-8 w-8 items-center justify-center rounded-lg bg-surface-3 text-fg hover:bg-rose-500/20 hover:text-rose-400"
+                className="flex h-8 w-8 items-center justify-center rounded-xl border border-line/70 bg-surface-2/80 text-muted transition hover:border-rose-400/40 hover:bg-rose-500/18 hover:text-rose-300"
               >
                 <Icon name="close" size={15} />
               </button>
             </div>
 
-            <div className="scroll-thin min-h-0 flex-1 space-y-2 overflow-y-auto bg-surface p-3">
+            <div className="scroll-thin min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
               {friendsLoading ? (
-                <p className="p-8 text-center text-xs font-bold text-fg">در حال بارگذاری فهرست دوستان…</p>
+                <p className="p-8 text-center text-xs font-bold text-muted">در حال بارگذاری فهرست دوستان…</p>
               ) : friends.length === 0 ? (
-                <div className="rounded-lg border border-line bg-surface-2 p-6 text-center">
+                <div className="rounded-xl border border-line bg-surface-2/70 p-6 text-center backdrop-blur-md">
                   <p className="text-sm font-black text-fg">دوست آماده‌ای برای دعوت نیست</p>
                   <p className="mt-1.5 text-xs leading-6 text-muted">
-                    همهٔ دوستان شما هم‌اکنون در جلسه حضور دارند یا هنوز دوستی اضافه نکرده‌اید. می‌توانید لینک جلسه را مستقیماً بفرستید.
+                    همهٔ دوستان شما هم‌اکنون در جلسه هستند یا می‌توانید لینک جلسه را مستقیماً بفرستید.
                   </p>
                 </div>
               ) : (
@@ -979,10 +1200,10 @@ export default function Meet({ token, minimized = false, onMinimize, onExpand, o
                       type="button"
                       onClick={() => setPicked((prev) => (on ? prev.filter((x) => x !== f.id) : [...prev, f.id]))}
                       aria-pressed={on}
-                      className={`flex w-full items-center gap-3 rounded-lg border p-2.5 text-right transition ${
+                      className={`press flex w-full items-center gap-3 rounded-xl border p-2.5 text-right backdrop-blur-md transition ${
                         on
-                          ? "border-accent bg-surface-3 ring-1 ring-accent"
-                          : "border-line bg-surface-2 hover:border-accent/50 hover:bg-surface-3"
+                          ? "border-accent/55 bg-accent/16 shadow-sm"
+                          : "border-line bg-surface-2/70 hover:border-accent/35 hover:bg-surface-2"
                       }`}
                     >
                       <Avatar name={f.displayName} color={f.avatarColor} size={40} userId={f.id} avatarFileId={f.avatarFileId} status={f.status} />
@@ -991,8 +1212,8 @@ export default function Meet({ token, minimized = false, onMinimize, onExpand, o
                         <span className="block truncate text-xs font-semibold text-accent" dir="ltr">@{f.username}</span>
                       </span>
                       <span
-                        className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md border transition ${
-                          on ? "border-accent bg-accent text-on-accent" : "border-line bg-surface text-muted"
+                        className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-lg border transition ${
+                          on ? "border-accent/60 bg-accent/25 text-accent" : "border-line bg-surface/80 text-muted"
                         }`}
                       >
                         {on && <Icon name="check" size={14} strokeWidth={2.8} />}
@@ -1004,19 +1225,19 @@ export default function Meet({ token, minimized = false, onMinimize, onExpand, o
             </div>
 
             {invitedNames.length > 0 && (
-              <p className="border-t border-line bg-surface-2 px-4 py-2 text-xs font-bold text-emerald-400">
+              <p className="border-t border-line/70 bg-emerald-500/10 px-4 py-2 text-xs font-bold text-emerald-300">
                 دعوت‌نامه ارسال شد به: {invitedNames.join("، ")}
               </p>
             )}
 
-            <div className="flex items-center gap-2 border-t border-line bg-surface-2 px-4 py-3">
-              <span className="flex-1 text-xs font-bold text-fg">
-                {picked.length ? `${faNum(picked.length)} نفر انتخاب شده` : "یک یا چند دوست را انتخاب کنید"}
+            <div className="flex items-center gap-2 border-t border-line/75 bg-surface-2/60 px-4 py-3">
+              <span className="flex-1 text-xs font-bold text-muted">
+                {picked.length ? `${faNum(picked.length)} نفر انتخاب شده` : "انتخاب دوستان"}
               </span>
               <button
                 type="button"
                 onClick={() => setInviteOpen(false)}
-                className="rounded-lg border border-line bg-surface-3 px-3.5 py-2 text-xs font-bold text-fg hover:bg-surface"
+                className="press rounded-xl border border-line bg-surface-2/85 px-3.5 py-2 text-xs font-bold text-fg backdrop-blur-md hover:bg-surface-3"
               >
                 بستن
               </button>
@@ -1024,7 +1245,7 @@ export default function Meet({ token, minimized = false, onMinimize, onExpand, o
                 type="button"
                 onClick={() => void sendInvites()}
                 disabled={!picked.length || inviting}
-                className="grad-accent press flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-black text-on-accent shadow-md transition hover:brightness-110 disabled:opacity-45"
+                className="press flex items-center gap-1.5 rounded-xl border border-accent/50 bg-accent/22 px-4 py-2 text-xs font-black text-accent backdrop-blur-md transition hover:border-accent hover:bg-accent/32 disabled:opacity-45"
               >
                 <Icon name="send" size={14} className="-scale-x-100" />
                 {inviting ? "در حال ارسال…" : "ارسال دعوت"}
@@ -1035,55 +1256,101 @@ export default function Meet({ token, minimized = false, onMinimize, onExpand, o
         document.body,
       )}
 
-      {/* Main workspace: Stage + Participant Grid/Sidebar + Optional Side Panel */}
+      {/* Main workspace: Stage + Participant Grid/Sidebar + Optional Resizable Side Panel */}
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        <main className={`flex min-w-0 flex-1 gap-2.5 p-2.5 sm:p-3.5 ${stage ? "flex-col lg:flex-row" : "flex-col"}`}>
-          {/* Stage: Shared Screen or Pinned Camera */}
+        <main className={`flex min-w-0 flex-1 gap-2.5 p-2.5 sm:p-3.5 ${stage && stripParticipants.length > 0 ? "flex-col lg:flex-row" : "flex-col"}`}>
+          {/* Stage: Shared Screen, Pinned Camera, or Spotlighted User Tile */}
           {stage && (
-            <div ref={streamFsRef} className="relative flex min-h-[240px] flex-1 items-center justify-center overflow-hidden rounded-xl border border-line bg-[#090b10] shadow-xl">
-              <Stage
-                stream={stage.stream}
-                name={stage.who.name}
-                kind={stage.kind}
-                mirrored={stage.kind === "camera" && stage.who.joinToken === meeting.joinToken}
-              />
+            <div
+              ref={streamFsRef}
+              onClick={() => {
+                if (stage.kind !== "screen") setStageTarget(null);
+              }}
+              className={`relative flex min-h-[240px] flex-1 items-center justify-center overflow-hidden rounded-2xl border border-line bg-[#090b10] shadow-xl ${
+                stage.kind !== "screen" ? "cursor-zoom-out" : ""
+              }`}
+              style={
+                stage.kind === "user"
+                  ? { background: `radial-gradient(95% 95% at 50% 35%, ${stage.who.avatarColor}38 0%, var(--surface-2) 78%)` }
+                  : undefined
+              }
+            >
+              {stage.kind === "user" ? (
+                <div className="flex flex-col items-center gap-3.5 px-4 text-center">
+                  <div
+                    className={`rounded-full p-1.5 transition ${
+                      (stage.who.joinToken === meeting.joinToken ? meeting.micOn && meeting.speaking : stage.who.micOn && !stage.who.micMuted)
+                        ? "ring-4 ring-accent/65"
+                        : ""
+                    }`}
+                  >
+                    <Avatar
+                      name={stage.who.name}
+                      color={stage.who.avatarColor}
+                      size={132}
+                      userId={stage.who.userId ?? undefined}
+                      avatarFileId={stage.who.avatarFileId ?? undefined}
+                    />
+                  </div>
+                  <div>
+                    <p className="text-lg font-black text-fg">{stage.who.name}</p>
+                    <p className="mt-0.5 text-xs text-muted">
+                      {stage.who.micMuted ? "میکروفون بسته" : stage.who.micOn ? "میکروفون روشن" : "میکروفون خاموش"} · کلیک برای بازگشت به نمای شبکه‌ای
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <Stage
+                  stream={stage.stream}
+                  name={stage.who.name}
+                  kind={stage.kind}
+                  mirrored={stage.kind === "camera" && stage.who.joinToken === meeting.joinToken}
+                />
+              )}
 
               {/* Top overlay controls on stage */}
-              <div className="pointer-events-none absolute inset-x-0 top-0 flex items-center justify-between gap-2 bg-gradient-to-b from-black/75 via-black/30 to-transparent px-3 py-2.5">
-                <span className="flex items-center gap-1.5 rounded-md bg-black/60 px-2.5 py-1 text-[11px] font-bold text-white backdrop-blur">
-                  <Icon name={stage.kind === "camera" ? "video" : "screen"} size={13} className="text-accent" />
+              <div
+                onClick={(e) => e.stopPropagation()}
+                className="pointer-events-none absolute inset-x-0 top-0 flex items-center justify-between gap-2 bg-gradient-to-b from-black/75 via-black/30 to-transparent px-3 py-2.5"
+              >
+                <span className="flex items-center gap-1.5 rounded-lg bg-black/60 px-2.5 py-1 text-[11px] font-bold text-white backdrop-blur">
+                  <Icon name={stage.kind === "camera" ? "video" : stage.kind === "user" ? "user" : "screen"} size={13} className="text-accent" />
                   {stage.kind === "camera"
                     ? `کمرای ${stage.who.joinToken === meeting.joinToken ? "شما" : stage.who.name} · ${stage.who.cameraQuality ?? "720p"}`
-                    : `صفحهٔ ${stage.who.joinToken === meeting.joinToken ? "شما" : stage.who.name} · ${stage.who.shareQuality ?? "720p"} · ${faNum(stage.who.shareFps ?? 30)} فریم`}
+                    : stage.kind === "user"
+                      ? `بزرگ‌نمایی ${stage.who.joinToken === meeting.joinToken ? "شما" : stage.who.name}`
+                      : `صفحهٔ ${stage.who.joinToken === meeting.joinToken ? "شما" : stage.who.name} · ${stage.who.shareQuality ?? "720p"} · ${faNum(stage.who.shareFps ?? 30)} فریم`}
                 </span>
                 <span className="pointer-events-auto flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => void toggleFullscreen(streamFsRef.current)}
-                    className="flex items-center gap-1 rounded-md bg-black/60 px-2.5 py-1 text-[11px] font-semibold text-white backdrop-blur hover:bg-black/85"
-                    title={streamFs ? "خروج از تمام‌صفحهٔ استریم" : "تمام‌صفحه کردن استریم"}
-                  >
-                    <Icon name={streamFs ? "minimize" : "maximize"} size={13} />
-                    <span>{streamFs ? "کوچک‌نمایی" : "تمام‌صفحه استریم"}</span>
-                  </button>
+                  {stage.kind !== "user" && (
+                    <button
+                      type="button"
+                      onClick={() => void toggleFullscreen(streamFsRef.current)}
+                      className="flex items-center gap-1 rounded-lg bg-black/60 px-2.5 py-1 text-[11px] font-semibold text-white backdrop-blur hover:bg-black/85"
+                      title={streamFs ? "خروج از تمام‌صفحهٔ استریم" : "تمام‌صفحه کردن استریم"}
+                    >
+                      <Icon name={streamFs ? "minimize" : "maximize"} size={13} />
+                      <span>{streamFs ? "کوچک‌نمایی" : "تمام‌صفحه"}</span>
+                    </button>
+                  )}
                   <button
                     onClick={() => {
                       if (document.fullscreenElement === streamFsRef.current) void document.exitFullscreen().catch(() => {});
                       setStageTarget(null);
                       if (stage.kind === "screen") setStageMinimized(true);
                     }}
-                    className="rounded-md bg-black/60 px-2.5 py-1 text-[11px] font-semibold text-white/85 backdrop-blur hover:bg-black/80"
+                    className="rounded-lg bg-black/60 px-2.5 py-1 text-[11px] font-semibold text-white/90 backdrop-blur hover:bg-black/80"
                     title="نمای شبکه‌ای افراد"
                   >
                     نمای شبکه‌ای
                   </button>
                   {stage.kind === "screen" && stage.who.joinToken === meeting.joinToken && (
-                    <button onClick={() => void meeting.stopShare()} className="rounded-md bg-rose-500/85 px-2.5 py-1 text-[11px] font-bold text-white backdrop-blur hover:bg-rose-500">
+                    <button onClick={() => void meeting.stopShare()} className="rounded-lg bg-rose-500/85 px-2.5 py-1 text-[11px] font-bold text-white backdrop-blur hover:bg-rose-500">
                       توقف اشتراک من
                     </button>
                   )}
                   {stage.kind === "screen" && stage.who.joinToken !== meeting.joinToken && meeting.amHost && !stage.who.isHost && (
-                    <button onClick={() => void meeting.hostAction("block-share", stage.who.joinToken)} className="rounded-md bg-rose-500/80 px-2.5 py-1 text-[11px] font-bold text-white backdrop-blur hover:bg-rose-500">
+                    <button onClick={() => void meeting.hostAction("block-share", stage.who.joinToken)} className="rounded-lg bg-rose-500/80 px-2.5 py-1 text-[11px] font-bold text-white backdrop-blur hover:bg-rose-500">
                       بستن اشتراک
                     </button>
                   )}
@@ -1094,9 +1361,12 @@ export default function Meet({ token, minimized = false, onMinimize, onExpand, o
               {stage.kind === "screen" && presenterPiPCamera && (
                 <button
                   type="button"
-                  onClick={() => setStageTarget({ token: stage.who.joinToken, kind: "camera" })}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setStageTarget({ token: stage.who.joinToken, kind: "camera" });
+                  }}
                   title="بزرگ‌نمایی کمرای ارائه‌دهنده"
-                  className="group absolute bottom-3 end-3 h-24 w-36 sm:h-28 sm:w-44 overflow-hidden rounded-lg border border-white/20 bg-black shadow-2xl transition hover:scale-[1.03]"
+                  className="group absolute bottom-3 end-3 h-24 w-36 sm:h-28 sm:w-44 overflow-hidden rounded-xl border border-white/20 bg-black shadow-2xl transition hover:scale-[1.03]"
                 >
                   <VideoTile stream={presenterPiPCamera} mirrored={stage.who.joinToken === meeting.joinToken} />
                   <span className="absolute bottom-1.5 start-1.5 rounded bg-black/65 px-1.5 py-0.5 text-[10px] font-semibold text-white backdrop-blur">
@@ -1114,7 +1384,7 @@ export default function Meet({ token, minimized = false, onMinimize, onExpand, o
                 <button
                   key={item.key}
                   onClick={() => { setStageMinimized(false); setStageTarget({ token: item.token, kind: "screen" }); }}
-                  className="flex items-center gap-1.5 rounded-lg border border-accent/30 bg-accent/10 px-3 py-1.5 text-xs font-bold text-accent hover:bg-accent/20"
+                  className="flex items-center gap-1.5 rounded-lg border border-accent/30 bg-accent/15 px-3 py-1.5 text-xs font-bold text-accent hover:bg-accent/25"
                 >
                   <Icon name="screen" size={13} /> بازگشت به اشتراک صفحهٔ {item.token === meeting.joinToken ? "شما" : item.who.name}
                 </button>
@@ -1130,377 +1400,522 @@ export default function Meet({ token, minimized = false, onMinimize, onExpand, o
             </div>
           )}
 
-          {/* Adaptive Participant Strip (when stage active) or Responsive Grid (when no stage) */}
-          <div
-            className={
-              stage
-                ? "scroll-thin flex shrink-0 gap-2.5 overflow-x-auto lg:w-64 xl:w-72 lg:flex-col lg:overflow-x-hidden lg:overflow-y-auto"
-                : `scroll-thin grid min-h-0 flex-1 gap-2.5 sm:gap-3 overflow-y-auto auto-rows-fr ${adaptiveGridClass(visibleParticipants.length)}`
-            }
-          >
-            {visibleParticipants.map((p) => {
-              const mine = p.joinToken === meeting.joinToken;
-              const speaking = mine ? meeting.micOn && meeting.speaking : p.micOn && !p.micMuted;
-              const pStreams = getParticipantStreams(p);
-              const cameraStream = pStreams.camera;
-              const screenStream = pStreams.screen;
-              const isPinnedCam = stage?.kind === "camera" && stage?.who.joinToken === p.joinToken;
-              const isPinnedScreen = stage?.kind === "screen" && stage?.who.joinToken === p.joinToken;
+          {/* Adaptive Participant Strip (when stage active & strip non-empty) or Responsive 1/2/3 Grid (when no stage) */}
+          {(!stage || stripParticipants.length > 0) && (
+            <div
+              className={
+                stage
+                  ? "scroll-thin flex shrink-0 gap-2.5 overflow-x-auto lg:w-64 xl:w-72 lg:flex-col lg:overflow-x-hidden lg:overflow-y-auto"
+                  : `scroll-thin grid min-h-0 flex-1 gap-2.5 sm:gap-3 overflow-y-auto auto-rows-fr ${adaptiveGridClass(visibleParticipants.length)}`
+              }
+            >
+              {(stage ? stripParticipants : visibleParticipants).map((p) => {
+                const mine = p.joinToken === meeting.joinToken;
+                const speaking = mine ? meeting.micOn && meeting.speaking : p.micOn && !p.micMuted;
+                const pStreams = getParticipantStreams(p);
+                const cameraStream = pStreams.camera;
+                const screenStream = pStreams.screen;
+                const isPinnedThis = stage?.who.joinToken === p.joinToken;
 
-              return (
-                <div
-                  key={p.joinToken}
-                  tabIndex={0}
-                  aria-label={p.name}
-                  onDoubleClick={() => {
-                    if (cameraStream) {
+                return (
+                  <div
+                    key={p.joinToken}
+                    tabIndex={0}
+                    aria-label={p.name}
+                    onClick={() => {
                       setStageMinimized(false);
-                      setStageTarget(isPinnedCam ? null : { token: p.joinToken, kind: "camera" });
-                    } else if (screenStream) {
-                      setStageMinimized(false);
-                      setStageTarget({ token: p.joinToken, kind: "screen" });
-                    }
-                  }}
-                  onContextMenu={(e) => open(e, personMenu(p))}
-                  className={`group anim-rise relative flex items-center justify-center overflow-hidden rounded-xl border transition-all duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 ${
-                    stage
-                      ? "h-32 w-48 shrink-0 lg:h-40 lg:w-full"
-                      : visibleParticipants.length === 1
-                        ? "min-h-[260px]"
-                        : "min-h-[165px]"
-                  } ${
-                    speaking
-                      ? "border-accent ring-2 ring-accent/70"
-                      : isPinnedCam || isPinnedScreen
-                        ? "border-accent/50"
-                        : "border-line"
-                  }`}
-                  style={{ background: `radial-gradient(120% 120% at 30% 20%, ${p.avatarColor}26 0%, var(--surface-2) 74%)` }}
-                >
-                  {cameraStream ? (
-                    <VideoTile stream={cameraStream} mirrored={mine} />
-                  ) : (
-                    <div className="pointer-events-none flex flex-col items-center gap-2 px-2 text-center">
-                      <Avatar
-                        name={p.name}
-                        color={p.avatarColor}
-                        size={stage ? 52 : visibleParticipants.length <= 2 ? 96 : visibleParticipants.length <= 4 ? 76 : 60}
-                        userId={p.userId ?? undefined}
-                        avatarFileId={p.avatarFileId ?? undefined}
-                      />
-                      {!stage && <p className="max-w-full truncate text-sm font-bold text-fg/90">{p.name}</p>}
-                    </div>
-                  )}
-
-                  {/* Quick action buttons on top-end */}
-                  <div className="absolute end-2 top-2 flex items-center gap-1">
-                    {(cameraStream || screenStream) && (
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (screenStream && !isPinnedScreen) {
-                            setStageMinimized(false);
-                            setStageTarget({ token: p.joinToken, kind: "screen" });
-                          } else if (cameraStream) {
-                            setStageMinimized(false);
-                            setStageTarget(isPinnedCam ? null : { token: p.joinToken, kind: "camera" });
-                          }
-                        }}
-                        title="نمایش در صحنهٔ اصلی"
-                        className="flex h-7 w-7 items-center justify-center rounded-md bg-black/50 text-white/80 opacity-0 backdrop-blur transition hover:bg-black/75 hover:text-white group-hover:opacity-100 focus:opacity-100"
-                      >
-                        <Icon name="pin" size={13} />
-                      </button>
+                      if (isPinnedThis && stage?.kind !== "screen") {
+                        setStageTarget(null);
+                      } else if (cameraStream) {
+                        setStageTarget({ token: p.joinToken, kind: "camera" });
+                      } else {
+                        setStageTarget({ token: p.joinToken, kind: "user" });
+                      }
+                    }}
+                    onContextMenu={(e) => open(e, personMenu(p))}
+                    title="کلیک برای بزرگ‌نمایی در صحنهٔ اصلی"
+                    className={`group anim-rise relative flex cursor-pointer items-center justify-center overflow-hidden rounded-2xl border transition-all duration-200 hover:border-accent/45 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 ${
+                      stage
+                        ? "h-32 w-48 shrink-0 lg:h-40 lg:w-full"
+                        : visibleParticipants.length === 1
+                          ? "min-h-[260px]"
+                          : "min-h-[165px]"
+                    } ${
+                      speaking
+                        ? "border-accent ring-2 ring-accent/70"
+                        : isPinnedThis
+                          ? "border-accent/55"
+                          : "border-line"
+                    }`}
+                    style={{ background: `radial-gradient(120% 120% at 30% 20%, ${p.avatarColor}28 0%, var(--surface-2) 74%)` }}
+                  >
+                    {cameraStream ? (
+                      <VideoTile stream={cameraStream} mirrored={mine} />
+                    ) : (
+                      <div className="pointer-events-none flex flex-col items-center gap-2 px-2 text-center">
+                        <Avatar
+                          name={p.name}
+                          color={p.avatarColor}
+                          size={stage ? 52 : visibleParticipants.length <= 2 ? 96 : visibleParticipants.length <= 4 ? 76 : 60}
+                          userId={p.userId ?? undefined}
+                          avatarFileId={p.avatarFileId ?? undefined}
+                        />
+                        {!stage && <p className="max-w-full truncate text-sm font-bold text-fg/90">{p.name}</p>}
+                      </div>
                     )}
-                    <button
-                      type="button"
-                      onClick={(e) => { e.stopPropagation(); open(e, personMenu(p)); }}
-                      aria-label={`گزینه‌های ${p.name}`}
-                      className="flex h-7 w-7 items-center justify-center rounded-md bg-black/50 text-white/80 backdrop-blur transition hover:bg-black/75 hover:text-white sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100"
-                    >
-                      <Icon name="more-vertical" size={14} />
-                    </button>
-                  </div>
 
-                  {/* Top-start badges */}
-                  <div className="absolute start-2 top-2 flex items-center gap-1">
-                    {p.isHost && (
-                      <span className="rounded bg-amber-400/95 px-1.5 py-0.5 text-[10px] font-bold text-[#3a2700]">
-                        میزبان
-                      </span>
-                    )}
-                    {p.sharingOn && (
+                    {/* Quick action buttons on top-end */}
+                    <div className="absolute end-2 top-2 flex items-center gap-1">
                       <button
                         type="button"
                         onClick={(e) => {
                           e.stopPropagation();
                           setStageMinimized(false);
-                          setStageTarget({ token: p.joinToken, kind: "screen" });
+                          if (screenStream && stage?.kind !== "screen") {
+                            setStageTarget({ token: p.joinToken, kind: "screen" });
+                          } else if (isPinnedThis) {
+                            setStageTarget(null);
+                          } else {
+                            setStageTarget({ token: p.joinToken, kind: cameraStream ? "camera" : "user" });
+                          }
                         }}
-                        className="flex items-center gap-1 rounded bg-accent/90 px-1.5 py-0.5 text-[10px] font-bold text-on-accent shadow"
-                        title="مشاهدهٔ صفحهٔ اشتراکی"
+                        title="نمایش در صحنهٔ اصلی"
+                        className="flex h-7 w-7 items-center justify-center rounded-md bg-black/50 text-white/80 opacity-0 backdrop-blur transition hover:bg-black/75 hover:text-white group-hover:opacity-100 focus:opacity-100"
                       >
-                        <Icon name="screen" size={10} /> اشتراک صفحه
+                        <Icon name="maximize" size={12} />
                       </button>
-                    )}
-                  </div>
-
-                  {/* Bottom bar */}
-                  <div className="absolute inset-x-0 bottom-0 flex items-center justify-between gap-1.5 bg-gradient-to-t from-black/85 via-black/40 to-transparent px-2.5 pb-2 pt-7">
-                    <span className="flex min-w-0 items-center gap-1 rounded bg-black/50 px-2 py-0.5 text-[11px] font-semibold text-white backdrop-blur">
-                      {mine && <span className="text-white/60">(شما)</span>}
-                      <span className="truncate">{p.name}</span>
-                      {p.isGuest && <span className="rounded bg-white/15 px-1 text-[9px] text-white/75">مهمان</span>}
-                    </span>
-                    <span className="flex shrink-0 items-center gap-1">
-                      {p.cameraOn && (
-                        <span className="flex h-6 w-6 items-center justify-center rounded-md bg-[#1a73e8] text-white" title={`کمرا روشن · ${p.cameraQuality}`}>
-                          <Icon name="video" size={12} />
-                        </span>
-                      )}
-                      <span
-                        className={`flex h-6 w-6 items-center justify-center rounded-md ${
-                          p.micMuted
-                            ? "bg-[#ea4335] text-white"
-                            : p.micOn
-                              ? "bg-emerald-500/85 text-[#062417]"
-                              : "bg-black/55 text-white/65 backdrop-blur"
-                        }`}
-                        title={p.micMuted ? "میکروفون بسته" : p.micOn ? "میکروفون روشن" : "میکروفون خاموش"}
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); open(e, personMenu(p)); }}
+                        aria-label={`گزینه‌های ${p.name}`}
+                        className="flex h-7 w-7 items-center justify-center rounded-md bg-black/50 text-white/80 backdrop-blur transition hover:bg-black/75 hover:text-white sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100"
                       >
-                        <Icon name={p.micOn && !p.micMuted ? "mic" : "mic-off"} size={12} />
-                      </span>
-                    </span>
-                  </div>
-
-                  {mine && meeting.micOn && (
-                    <div className="absolute bottom-9 start-2.5 h-1 w-16 overflow-hidden rounded-full bg-black/30">
-                      <LevelBar active />
+                        <Icon name="more-vertical" size={14} />
+                      </button>
                     </div>
-                  )}
-                </div>
-              );
-            })}
 
-            {visibleParticipants.length === 0 && !stage && (
-              <p className="col-span-full flex items-center justify-center rounded-xl border border-dashed border-line p-8 text-center text-xs text-muted">
-                هنوز کسی در جلسه نیست. لینک جلسه را به اشتراک بگذارید.
-              </p>
-            )}
-          </div>
-        </main>
-
-        {/* People Side Panel */}
-        {panel === "people" && (
-          <aside className="anim-slide-panel fixed inset-0 z-30 flex flex-col bg-surface sm:static sm:w-96 sm:shrink-0 sm:border-s sm:border-line">
-            <div className="flex shrink-0 items-center gap-2 border-b border-line p-2.5">
-              <p className="flex-1 px-1.5 text-sm font-bold">افراد در جلسه ({faNum(inCall.length)})</p>
-              <button onClick={() => setPanel(null)} aria-label="بستن" className="flex h-8 w-8 items-center justify-center rounded-lg text-muted hover:bg-surface-2 hover:text-fg"><Icon name="close" size={16} /></button>
-            </div>
-            <div className="scroll-thin min-h-0 flex-1 space-y-2.5 overflow-y-auto p-3">
-              {meeting.amHost && lobby.length > 0 && (
-                <div className="rounded-xl bg-amber-400/10 p-3 ring-1 ring-amber-400/25">
-                  <p className="mb-2 flex items-center gap-2 text-xs font-bold text-amber-400"><Icon name="clock" size={14} /> در انتظار تأیید ({faNum(lobby.length)})</p>
-                  <div className="space-y-2">
-                    {lobby.map((p) => (
-                      <div key={p.joinToken} className="flex items-center gap-2">
-                        <Avatar name={p.name} color={p.avatarColor} size={32} userId={p.userId ?? undefined} avatarFileId={p.avatarFileId ?? undefined} />
-                        <span className="min-w-0 flex-1 truncate text-xs font-semibold">
-                          {p.name}
-                          {p.isGuest && <span className="text-[10px] font-normal text-muted"> · مهمان</span>}
+                    {/* Top-start badges */}
+                    <div className="absolute start-2 top-2 flex flex-wrap items-center gap-1">
+                      {p.isHost && (
+                        <span className="rounded-md border border-amber-400/45 bg-amber-400/20 px-1.5 py-0.5 text-[10px] font-bold text-amber-200 backdrop-blur-md">
+                          میزبان
                         </span>
-                        <button onClick={() => void meeting.hostAction("admit", p.joinToken)} className="rounded-lg bg-emerald-500 px-2.5 py-1.5 text-[11px] font-bold text-[#0b2b1d] hover:bg-emerald-400">راه بده</button>
-                        <button onClick={() => void meeting.hostAction("kick", p.joinToken)} aria-label="رد کردن" className="flex h-7 w-7 items-center justify-center rounded-lg bg-surface-2 text-muted hover:bg-rose-500/20 hover:text-rose-400"><Icon name="close" size={13} /></button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {inCall.map((p) => {
-                const vol = meeting.prefs.volumes[p.joinToken] ?? 100;
-                const mine = p.joinToken === meeting.joinToken;
-                return (
-                  <div key={p.joinToken} onContextMenu={(e) => open(e, personMenu(p))} className="flex items-center gap-2.5 rounded-xl border border-line bg-surface-2 p-2.5">
-                    <Avatar name={p.name} color={p.avatarColor} size={36} userId={p.userId ?? undefined} avatarFileId={p.avatarFileId ?? undefined} />
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-xs font-bold">
-                        {p.name}
-                        {mine && <span className="text-[10px] font-normal text-muted"> (شما)</span>}
-                        {p.isHost && <span className="ms-1 rounded bg-amber-400/20 px-1.5 py-0.5 text-[10px] text-amber-400">میزبان</span>}
-                      </p>
-                      <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-muted">
-                        <span className="flex items-center gap-1">
-                          <Icon name={p.micMuted ? "mic-off" : p.micOn ? "mic" : "mic-off"} size={11} className={p.micMuted ? "text-red-400" : p.micOn ? "text-emerald-400" : ""} />
-                          {p.micMuted ? "میکروفون بسته" : p.micOn ? "میکروفون روشن" : "میکروفون خاموش"}
-                        </span>
-                        {p.cameraOn && <span className="flex items-center gap-1 text-accent"><Icon name="video" size={11} /> کمرا ({p.cameraQuality})</span>}
-                        {p.sharingOn && <span className="flex items-center gap-1 text-accent"><Icon name="screen" size={11} /> صفحه ({p.shareQuality})</span>}
-                      </div>
-                      {!mine && (
-                        <div className="mt-1.5 flex items-center gap-2">
-                          <button onClick={() => meeting.setVolume(p.joinToken, vol === 0 ? 100 : 0)} aria-label="صدا" className="text-muted hover:text-fg">
-                            <Icon name={vol === 0 ? "volume-off" : "volume"} size={13} />
-                          </button>
-                          <input type="range" min={0} max={100} value={vol} onChange={(e) => meeting.setVolume(p.joinToken, Number(e.target.value))} aria-label={`صدای ${p.name}`} className="h-1 min-w-0 flex-1 accent-[var(--accent)]" />
-                        </div>
+                      )}
+                      {(() => {
+                        const effectiveState = mine ? meeting.myConnState : (p.connState || "connecting");
+                        const cm = CONN_META[effectiveState] || CONN_META.connecting;
+                        return (
+                          <span
+                            title={cm.label}
+                            className={`inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[9.5px] font-bold backdrop-blur-md ${cm.cls}`}
+                          >
+                            <span className={`h-1.5 w-1.5 rounded-full ${cm.dot}`} />
+                            <span>{cm.short}</span>
+                          </span>
+                        );
+                      })()}
+                      {p.sharingOn && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setStageMinimized(false);
+                            setStageTarget({ token: p.joinToken, kind: "screen" });
+                          }}
+                          className="flex items-center gap-1 rounded-md border border-accent/50 bg-accent/25 px-1.5 py-0.5 text-[10px] font-bold text-accent backdrop-blur-md"
+                          title="مشاهدهٔ صفحهٔ اشتراکی"
+                        >
+                          <Icon name="screen" size={10} /> اشتراک صفحه
+                        </button>
                       )}
                     </div>
-                    <button onClick={(e) => open(e, personMenu(p))} aria-label={`گزینه‌های ${p.name}`} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-surface-3 hover:text-fg">
-                      <Icon name="more-vertical" size={15} />
-                    </button>
+
+                    {/* Bottom bar */}
+                    <div className="absolute inset-x-0 bottom-0 flex items-center justify-between gap-1.5 bg-gradient-to-t from-black/85 via-black/40 to-transparent px-2.5 pb-2 pt-7">
+                      <span className="flex min-w-0 items-center gap-1 rounded bg-black/50 px-2 py-0.5 text-[11px] font-semibold text-white backdrop-blur">
+                        {mine && <span className="text-white/60">(شما)</span>}
+                        <span className="truncate">{p.name}</span>
+                        {p.isGuest && <span className="rounded bg-white/15 px-1 text-[9px] text-white/75">مهمان</span>}
+                      </span>
+                      <span className="flex shrink-0 items-center gap-1">
+                        {p.cameraOn && (
+                          <span className="flex h-6 w-6 items-center justify-center rounded-md border border-sky-400/40 bg-sky-500/25 text-sky-300 backdrop-blur" title={`کمرا روشن · ${p.cameraQuality}`}>
+                            <Icon name="video" size={12} />
+                          </span>
+                        )}
+                        <span
+                          className={`flex h-6 w-6 items-center justify-center rounded-md ${
+                            p.micMuted
+                              ? "border border-rose-400/40 bg-rose-500/25 text-rose-300 backdrop-blur"
+                              : p.micOn
+                                ? "border border-emerald-400/40 bg-emerald-500/25 text-emerald-300 backdrop-blur"
+                                : "bg-black/55 text-white/65 backdrop-blur"
+                          }`}
+                          title={p.micMuted ? "میکروفون بسته" : p.micOn ? "میکروفون روشن" : "میکروفون خاموش"}
+                        >
+                          <Icon name={p.micOn && !p.micMuted ? "mic" : "mic-off"} size={12} />
+                        </span>
+                      </span>
+                    </div>
+
+                    {mine && meeting.micOn && (
+                      <div className="absolute bottom-9 start-2.5 h-1 w-16 overflow-hidden rounded-full bg-black/30">
+                        <LevelBar active />
+                      </div>
+                    )}
                   </div>
                 );
               })}
 
-              <div className="space-y-3 rounded-xl border border-line bg-surface-2 p-3 text-xs">
-                <div>
-                  <p className="mb-1.5 font-bold text-fg/80">میکروفون من (صدای ارسالی)</p>
-                  <div className="flex items-center gap-2">
-                    <Icon name="mic" size={14} className="shrink-0 text-muted" />
-                    <input type="range" min={0} max={200} value={meeting.prefs.micGain} onChange={(e) => meeting.setMicGain(Number(e.target.value))} aria-label="بلندی میکروفون من" className="h-1 min-w-0 flex-1 accent-[var(--accent)]" />
-                    <span className="w-10 text-left tabular-nums text-muted">{faNum(meeting.prefs.micGain)}٪</span>
-                  </div>
-                </div>
-                <div>
-                  <p className="mb-1.5 font-bold text-fg/80">صدای دریافتی کلی</p>
-                  <div className="flex items-center gap-2">
-                    <Icon name="volume" size={14} className="shrink-0 text-muted" />
-                    <input type="range" min={0} max={100} value={meeting.prefs.master} onChange={(e) => meeting.setMaster(Number(e.target.value))} aria-label="صدای کلی" className="h-1 flex-1 accent-[var(--accent)]" />
-                    <span className="w-10 text-left tabular-nums text-muted">{faNum(meeting.prefs.master)}٪</span>
-                  </div>
-                </div>
-              </div>
+              {visibleParticipants.length === 0 && !stage && (
+                <p className="col-span-full flex items-center justify-center rounded-xl border border-dashed border-line p-8 text-center text-xs text-muted">
+                  هنوز کسی در جلسه نیست. لینک جلسه را به اشتراک بگذارید.
+                </p>
+              )}
             </div>
+          )}
+        </main>
+
+        {/* Resizable Side Panel (People / Audio / Games) */}
+        {(panel === "people" || panel === "audio" || (panel === "games" && !gameExpanded)) && (
+          <aside
+            style={{ "--meet-side-w": `${sideWidth}px` }}
+            className="anim-slide-panel fixed inset-0 z-30 flex flex-col bg-surface sm:relative sm:inset-auto sm:w-[var(--meet-side-w)] sm:shrink-0 sm:border-s sm:border-line"
+          >
+            {/* Drag-resize handle on desktop */}
+            <div
+              onMouseDown={startSideResize}
+              title="تغییر اندازهٔ پنل کناری"
+              className={`group/resize absolute inset-y-0 -start-1 z-20 hidden w-2.5 cursor-col-resize items-center justify-center sm:flex ${
+                resizingSide ? "bg-accent/25" : "hover:bg-accent/15"
+              }`}
+            >
+              <span className={`h-10 w-0.5 rounded-full transition ${resizingSide ? "bg-accent" : "bg-transparent group-hover/resize:bg-accent/60"}`} />
+            </div>
+
+            {panel === "audio" && (
+              <>
+                <div className="flex shrink-0 items-center gap-2 border-b border-line p-2.5">
+                  <Icon name="sliders" size={16} className="ms-1 text-accent" />
+                  <p className="flex-1 text-sm font-black">تنظیمات صدا و نویزگیر</p>
+                  <button
+                    type="button"
+                    onClick={() => setPanel(null)}
+                    aria-label="بستن"
+                    className="flex h-8 w-8 items-center justify-center rounded-lg text-muted hover:bg-surface-2 hover:text-fg"
+                  >
+                    <Icon name="close" size={16} />
+                  </button>
+                </div>
+                <div className="scroll-thin min-h-0 flex-1 overflow-y-auto p-3">
+                  <AudioSettingsSection
+                    compact
+                    showAppSounds={false}
+                    externalCall={{
+                      prefs: meeting.prefs,
+                      devices: meeting.devices,
+                      micActive: meeting.micOn && !meeting.myState.micMuted,
+                      updateAudioPrefs: meeting.updateAudioPrefs,
+                      changeInput: meeting.changeInput,
+                      changeOutput: meeting.changeOutput,
+                      setMicGain: meeting.setMicGain,
+                      setMaster: meeting.setMaster,
+                    }}
+                  />
+                </div>
+              </>
+            )}
+
+            {panel === "people" && (
+              <>
+                <div className="flex shrink-0 items-center gap-2 border-b border-line p-2.5">
+                  <p className="flex-1 px-1.5 text-sm font-bold">افراد در جلسه ({faNum(inCall.length)})</p>
+                  <button onClick={() => setPanel(null)} aria-label="بستن" className="flex h-8 w-8 items-center justify-center rounded-lg text-muted hover:bg-surface-2 hover:text-fg"><Icon name="close" size={16} /></button>
+                </div>
+                <div className="scroll-thin min-h-0 flex-1 space-y-2.5 overflow-y-auto p-3">
+                  {meeting.amHost && (
+                    <label className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-line bg-surface-2 p-3 text-xs">
+                      <div className="min-w-0">
+                        <p className="font-black text-fg">نیاز به تأیید میزبان (لابی)</p>
+                        <p className="mt-0.5 text-[10px] leading-4 text-muted">
+                          {meeting.lobbyEnabled
+                            ? "افراد دارای لینک منتظر تأیید می‌مانند (دعوت‌شدگان همیشه مستقیم وارد می‌شوند)"
+                            : "هر کسی با لینک جلسه بلافاصله بدون انتظار وارد می‌شود"}
+                        </p>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={meeting.lobbyEnabled}
+                        onChange={(e) => void meeting.setLobby(e.target.checked)}
+                        className="h-4 w-4 shrink-0 accent-[var(--accent)]"
+                      />
+                    </label>
+                  )}
+
+                  {meeting.amHost && lobby.length > 0 && (
+                    <div className="rounded-xl bg-amber-400/10 p-3 ring-1 ring-amber-400/25">
+                      <p className="mb-2 flex items-center gap-2 text-xs font-bold text-amber-400"><Icon name="clock" size={14} /> در انتظار تأیید ({faNum(lobby.length)})</p>
+                      <div className="space-y-2">
+                        {lobby.map((p) => (
+                          <div key={p.joinToken} className="flex items-center gap-2">
+                            <Avatar name={p.name} color={p.avatarColor} size={32} userId={p.userId ?? undefined} avatarFileId={p.avatarFileId ?? undefined} />
+                            <span className="min-w-0 flex-1 truncate text-xs font-semibold">
+                              {p.name}
+                              {p.isGuest && <span className="text-[10px] font-normal text-muted"> · مهمان</span>}
+                            </span>
+                            <button onClick={() => void meeting.hostAction("admit", p.joinToken)} className="rounded-lg border border-emerald-400/40 bg-emerald-500/20 px-2.5 py-1.5 text-[11px] font-bold text-emerald-300 hover:bg-emerald-500/30">راه بده</button>
+                            <button onClick={() => void meeting.hostAction("kick", p.joinToken)} aria-label="رد کردن" className="flex h-7 w-7 items-center justify-center rounded-lg bg-surface-2 text-muted hover:bg-rose-500/20 hover:text-rose-400"><Icon name="close" size={13} /></button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {inCall.map((p) => {
+                    const vol = meeting.prefs.volumes[p.joinToken] ?? 100;
+                    const mine = p.joinToken === meeting.joinToken;
+                    return (
+                      <div key={p.joinToken} onContextMenu={(e) => open(e, personMenu(p))} className="flex items-center gap-2.5 rounded-xl border border-line bg-surface-2 p-2.5">
+                        <Avatar name={p.name} color={p.avatarColor} size={36} userId={p.userId ?? undefined} avatarFileId={p.avatarFileId ?? undefined} />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-xs font-bold">
+                            {p.name}
+                            {mine && <span className="text-[10px] font-normal text-muted"> (شما)</span>}
+                            {p.isHost && <span className="ms-1 rounded bg-amber-400/20 px-1.5 py-0.5 text-[10px] text-amber-400">میزبان</span>}
+                          </p>
+                          <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-muted">
+                            {(() => {
+                              const effectiveState = mine ? meeting.myConnState : (p.connState || "connecting");
+                              const cm = CONN_META[effectiveState] || CONN_META.connecting;
+                              return (
+                                <span className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[9.5px] font-bold ${cm.cls}`}>
+                                  <span className={`h-1.5 w-1.5 rounded-full ${cm.dot}`} />
+                                  {cm.short}
+                                </span>
+                              );
+                            })()}
+                            <span className="flex items-center gap-1">
+                              <Icon name={p.micMuted ? "mic-off" : p.micOn ? "mic" : "mic-off"} size={11} className={p.micMuted ? "text-red-400" : p.micOn ? "text-emerald-400" : ""} />
+                              {p.micMuted ? "میکروفون بسته" : p.micOn ? "میکروفون روشن" : "میکروفون خاموش"}
+                            </span>
+                            {p.cameraOn && <span className="flex items-center gap-1 text-accent"><Icon name="video" size={11} /> کمرا ({p.cameraQuality})</span>}
+                            {p.sharingOn && <span className="flex items-center gap-1 text-accent"><Icon name="screen" size={11} /> صفحه ({p.shareQuality})</span>}
+                          </div>
+                          {!mine && (
+                            <div className="mt-1.5 flex items-center gap-2">
+                              <button onClick={() => meeting.setVolume(p.joinToken, vol === 0 ? 100 : 0)} aria-label="صدا" className="text-muted hover:text-fg">
+                                <Icon name={vol === 0 ? "volume-off" : "volume"} size={13} />
+                              </button>
+                              <input type="range" min={0} max={100} value={vol} onChange={(e) => meeting.setVolume(p.joinToken, Number(e.target.value))} aria-label={`صدای ${p.name}`} className="h-1 min-w-0 flex-1 accent-[var(--accent)]" />
+                            </div>
+                          )}
+                        </div>
+                        <button onClick={(e) => open(e, personMenu(p))} aria-label={`گزینه‌های ${p.name}`} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-surface-3 hover:text-fg">
+                          <Icon name="more-vertical" size={15} />
+                        </button>
+                      </div>
+                    );
+                  })}
+
+                  <div className="space-y-3 rounded-xl border border-line bg-surface-2 p-3 text-xs">
+                    <div>
+                      <p className="mb-1.5 font-bold text-fg/80">میکروفون من (صدای ارسالی)</p>
+                      <div className="flex items-center gap-2">
+                        <Icon name="mic" size={14} className="shrink-0 text-muted" />
+                        <input type="range" min={0} max={200} value={meeting.prefs.micGain} onChange={(e) => meeting.setMicGain(Number(e.target.value))} aria-label="بلندی میکروفون من" className="h-1 min-w-0 flex-1 accent-[var(--accent)]" />
+                        <span className="w-10 text-left tabular-nums text-muted">{faNum(meeting.prefs.micGain)}٪</span>
+                      </div>
+                    </div>
+                    <div>
+                      <p className="mb-1.5 font-bold text-fg/80">صدای دریافتی کلی</p>
+                      <div className="flex items-center gap-2">
+                        <Icon name="volume" size={14} className="shrink-0 text-muted" />
+                        <input type="range" min={0} max={100} value={meeting.prefs.master} onChange={(e) => meeting.setMaster(Number(e.target.value))} aria-label="صدای کلی" className="h-1 flex-1 accent-[var(--accent)]" />
+                        <span className="w-10 text-left tabular-nums text-muted">{faNum(meeting.prefs.master)}٪</span>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setPanel("audio")}
+                      className="press flex w-full items-center justify-center gap-1.5 rounded-xl border border-accent/40 bg-accent/14 py-2 text-xs font-black text-accent hover:bg-accent/24"
+                    >
+                      <Icon name="sliders" size={14} />
+                      تنظیمات پیشرفتهٔ صدا، نویزگیر و آستانهٔ میکروفون
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+
+            {panel === "games" && !gameExpanded && (
+              <GamesPanel
+                meeting={meeting}
+                onClose={() => setPanel(null)}
+                expanded={false}
+                onToggleExpand={() => setGameExpanded(true)}
+              />
+            )}
           </aside>
         )}
 
-        {panel === "games" && (
-          <aside className="anim-slide-panel fixed inset-0 z-30 flex flex-col bg-surface sm:static sm:w-96 sm:shrink-0 sm:border-s sm:border-line">
-            <GamesPanel meeting={meeting} onClose={() => setPanel(null)} />
-          </aside>
+        {/* Large-scale Expanded Game Arena Modal */}
+        {panel === "games" && gameExpanded && (
+          <div
+            dir="rtl"
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-3 backdrop-blur-md sm:p-6"
+            onMouseDown={() => setGameExpanded(false)}
+          >
+            <div
+              onMouseDown={(e) => e.stopPropagation()}
+              className="anim-rise flex h-[min(92vh,820px)] w-full max-w-4xl flex-col overflow-hidden rounded-3xl border border-line bg-surface shadow-[0_28px_90px_rgba(0,0,0,.85)]"
+            >
+              <GamesPanel
+                meeting={meeting}
+                onClose={() => { setGameExpanded(false); setPanel(null); }}
+                expanded={true}
+                onToggleExpand={() => setGameExpanded(false)}
+              />
+            </div>
+          </div>
         )}
       </div>
 
-      {/* Footer Control Bar */}
+      {/* Floating Studio Dock Control Bar */}
       {meeting.shareError && (
         <p role="alert" className="shrink-0 bg-amber-400/10 px-4 py-1.5 text-center text-xs text-amber-400">{meeting.shareError}</p>
       )}
-      <footer className="flex shrink-0 flex-wrap items-center justify-center gap-2 border-t border-line bg-surface/60 px-3 py-2.5 sm:gap-2.5 sm:py-3 backdrop-blur">
-        <Ctrl
-          label={meeting.micOn ? "خاموش کردن میکروفون" : "روشن کردن میکروفون"}
-          tone={meeting.micOn ? "on" : "off"}
-          disabled={meeting.myState.micMuted}
-          onClick={() => void meeting.toggleMic()}
-          title={meeting.myState.micMuted ? "میزبان میکروفون شما را بسته است" : undefined}
-        >
-          <Icon name={meeting.micOn ? "mic" : "mic-off"} size={20} />
-        </Ctrl>
-
-        <div className="relative" ref={cameraRef}>
+      <footer className="flex shrink-0 items-center justify-center px-2.5 pb-2.5 pt-1.5 sm:px-4 sm:pb-3">
+        <div className="flex max-w-full flex-wrap items-center justify-center gap-1.5 rounded-3xl border border-line bg-surface/90 px-2.5 py-2 shadow-[0_14px_40px_rgba(0,0,0,.45)] backdrop-blur-xl sm:gap-2 sm:px-3.5">
+          {/* Audio & Video Group */}
           <Ctrl
-            label="تنظیمات کمرا"
-            tone={meeting.cameraOn ? "on" : "idle"}
-            disabled={meeting.myState.shareBlocked}
-            onClick={() => { setMediaMenu((m) => (m === "camera" ? null : "camera")); setLinkOpen(false); setInviteOpen(false); }}
-            title={meeting.myState.shareBlocked ? "میزبان اشتراک تصویر شما را بسته است" : "کیفیت کمرا و روشن/خاموش"}
+            label={meeting.micOn ? "خاموش کردن میکروفون" : "روشن کردن میکروفون"}
+            tone={meeting.micOn ? "on" : "off"}
+            disabled={meeting.myState.micMuted}
+            onClick={() => void meeting.toggleMic()}
+            title={meeting.myState.micMuted ? "میزبان میکروفون شما را بسته است" : undefined}
           >
-            <Icon name={meeting.cameraOn ? "video" : "camera"} size={20} />
-            {meeting.cameraOn && <span className="absolute -top-1 -end-1 rounded bg-accent px-1 text-[8px] font-black text-on-accent">{faNum(meeting.cameraFps)}</span>}
+            <Icon name={meeting.micOn ? "mic" : "mic-off"} size={19} />
           </Ctrl>
-          <MediaPopover
-            open={mediaMenu === "camera"}
-            title="تنظیمات کمرا"
-            quality={meeting.cameraQuality}
-            fps={meeting.cameraFps}
-            onPick={(q, f) => void (meeting.cameraOn ? meeting.changeCameraQuality(q, f) : meeting.startCamera(q, f))}
-            onClose={() => setMediaMenu(null)}
-            active={meeting.cameraOn}
-            onStop={() => void meeting.stopCamera()}
-            stopLabel="خاموش کردن کمرا"
-            icon="camera"
-            startLabel="روشن کردن کمرا"
-          />
-        </div>
 
-        <div className="relative" ref={shareRef}>
-          <Ctrl
-            label="تنظیمات اشتراک صفحه"
-            tone={meeting.sharing ? "warn" : "idle"}
-            disabled={meeting.myState.shareBlocked}
-            onClick={() => { setMediaMenu((m) => (m === "share" ? null : "share")); setLinkOpen(false); setInviteOpen(false); }}
-            title={meeting.myState.shareBlocked ? "میزبان اشتراک صفحهٔ شما را بسته است" : "اشتراک صفحهٔ نمایش"}
-          >
-            <Icon name="screen" size={20} />
-            {meeting.sharing && <span className="absolute -top-1 -end-1 rounded bg-rose-500 px-1 text-[8px] font-black text-white">{faNum(meeting.shareFps)}</span>}
-          </Ctrl>
-          <MediaPopover
-            open={mediaMenu === "share"}
-            title="اشتراک صفحهٔ نمایش"
-            quality={meeting.shareQuality}
-            fps={meeting.shareFps}
-            onPick={(q, f) => void (meeting.sharing ? meeting.changeShareQuality(q, f) : meeting.startShare(q, f))}
-            onClose={() => setMediaMenu(null)}
-            active={meeting.sharing}
-            onStop={() => void meeting.stopShare()}
-            stopLabel="توقف اشتراک صفحه"
-            icon="screen"
-            startLabel="شروع اشتراک صفحه"
-          />
-        </div>
-
-        <Ctrl label="بازی‌ها" tone={panel === "games" ? "warn" : "idle"} onClick={() => setPanel((p) => (p === "games" ? null : "games"))}>
-          <Icon name="gamepad" size={20} />
-        </Ctrl>
-        <Ctrl label="افراد" tone={panel === "people" ? "warn" : "idle"} onClick={() => setPanel((p) => (p === "people" ? null : "people"))}>
-          <Icon name="users" size={20} />
-          {meeting.amHost && lobby.length > 0 && (
-            <span className="absolute -top-1 -end-1 flex h-4 min-w-4 items-center justify-center rounded bg-amber-400 px-1 text-[9px] font-black text-[#3a2700]">
-              {faNum(lobby.length)}
-            </span>
-          )}
-        </Ctrl>
-        <Ctrl label="کپی لینک جلسه" onClick={() => void copyLink()}>
-          <Icon name="link" size={19} />
-        </Ctrl>
-        <Ctrl label="ورود به فضای برنامه (کوچک‌کردن جلسه)" onClick={() => minimizeToApp()} title="ورود به برنامه بدون قطع شدن جلسه">
-          <Icon name="pip" size={19} />
-        </Ctrl>
-        <Ctrl label={roomFs ? "خروج از تمام‌صفحه" : "تمام‌صفحه کردن جلسه"} tone={roomFs ? "warn" : "idle"} onClick={() => void toggleFullscreen(rootFsRef.current)}>
-          <Icon name={roomFs ? "minimize" : "maximize"} size={19} />
-        </Ctrl>
-
-        <div className="mx-1 h-8 w-px bg-line" />
-
-        {meeting.amHost ? (
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => void requestLeave()}
-              aria-label="خروج از جلسه (بدون پایان)"
-              title="خروج از جلسه — جلسه باز می‌ماند و بعداً می‌توانید برگردید"
-              className="press flex h-11 items-center gap-1.5 rounded-xl border border-line bg-surface-2 px-3.5 text-xs font-bold text-fg transition hover:bg-surface-3 sm:h-12 sm:px-4 sm:text-sm"
+          <div className="relative" ref={cameraRef}>
+            <Ctrl
+              label="تنظیمات کمرا"
+              tone={meeting.cameraOn ? "on" : "idle"}
+              disabled={meeting.myState.shareBlocked}
+              onClick={() => { setMediaMenu((m) => (m === "camera" ? null : "camera")); setLinkOpen(false); setInviteOpen(false); }}
+              title={meeting.myState.shareBlocked ? "میزبان اشتراک تصویر شما را بسته است" : "کیفیت کمرا و روشن/خاموش"}
+              badge={meeting.cameraOn ? meeting.cameraQuality : null}
             >
-              <Icon name="door" size={18} /> <span>خروج</span>
-            </button>
-            <button
-              onClick={() => void endMeeting()}
-              aria-label="پایان جلسه برای همه"
-              title="بستن کامل جلسه برای همهٔ اعضا"
-              className="press flex h-11 items-center gap-1.5 rounded-xl bg-[#ea4335] px-3.5 text-xs font-bold text-white shadow-lg transition hover:bg-[#d93025] sm:h-12 sm:px-5 sm:text-sm"
-            >
-              <Icon name="phone-off" size={18} /> <span className="hidden sm:inline">پایان جلسه</span>
-            </button>
+              <Icon name={meeting.cameraOn ? "video" : "camera"} size={19} />
+            </Ctrl>
+            <MediaPopover
+              open={mediaMenu === "camera"}
+              kind="camera"
+              title="تنظیمات تصویر کمرا"
+              subtitle="انتخاب کیفیت تصویر و نرخ فریم دوربین"
+              quality={meeting.cameraQuality}
+              fps={meeting.cameraFps}
+              onPick={(q, f) => void (meeting.cameraOn ? meeting.changeCameraQuality(q, f) : meeting.startCamera(q, f))}
+              onClose={() => setMediaMenu(null)}
+              active={meeting.cameraOn}
+              onStop={() => void meeting.stopCamera()}
+              stopLabel="خاموش کردن کمرا"
+              icon="camera"
+              startLabel="روشن کردن کمرا"
+            />
           </div>
-        ) : (
-          <button
-            onClick={() => void requestLeave()}
-            aria-label="خروج از جلسه"
-            className="press flex h-11 sm:h-12 items-center gap-2 rounded-xl bg-[#ea4335] px-4 sm:px-6 text-xs sm:text-sm font-bold text-white shadow-lg transition hover:bg-[#d93025]"
+
+          <div className="relative" ref={shareRef}>
+            <Ctrl
+              label="اشتراک صفحهٔ نمایش"
+              tone={meeting.sharing ? "accent" : "idle"}
+              disabled={meeting.myState.shareBlocked}
+              onClick={() => { setMediaMenu((m) => (m === "share" ? null : "share")); setLinkOpen(false); setInviteOpen(false); }}
+              title={meeting.myState.shareBlocked ? "میزبان اشتراک صفحهٔ شما را بسته است" : "تنظیم کیفیت و اشتراک صفحه"}
+              badge={meeting.sharing ? meeting.shareQuality : null}
+            >
+              <Icon name="screen" size={19} />
+            </Ctrl>
+            <MediaPopover
+              open={mediaMenu === "share"}
+              kind="share"
+              title="اشتراک صفحهٔ نمایش"
+              subtitle="وضوح واقعی ۴۸۰p / ۷۲۰p / ۱۰۸۰p با کنترل بیت‌ریت"
+              quality={meeting.shareQuality}
+              fps={meeting.shareFps}
+              onPick={(q, f) => void (meeting.sharing ? meeting.changeShareQuality(q, f) : meeting.startShare(q, f))}
+              onClose={() => setMediaMenu(null)}
+              active={meeting.sharing}
+              onStop={() => void meeting.stopShare()}
+              stopLabel="توقف اشتراک صفحه"
+              icon="screen"
+              startLabel="انتخاب صفحه و شروع اشتراک"
+            />
+          </div>
+
+          <div className="mx-0.5 h-7 w-px bg-line" />
+
+          {/* Collaboration & Audio Settings Group */}
+          <Ctrl
+            label="تنظیمات صدا و نویزگیر"
+            tone={panel === "audio" ? "warn" : "idle"}
+            onClick={() => setPanel((p) => (p === "audio" ? null : "audio"))}
+            title="تنظیمات میکروفون، حذف نویز جزئی و آستانهٔ ارسال صدا"
+            badge={meeting.prefs.vadEnabled ? `${faNum(meeting.prefs.vadThreshold)}٪` : null}
           >
-            <Icon name="phone-off" size={19} /> <span className="hidden sm:inline">خروج</span>
-          </button>
-        )}
+            <Icon name="sliders" size={19} />
+          </Ctrl>
+          <Ctrl
+            label="بازی‌های گروهی"
+            tone={panel === "games" ? "warn" : "idle"}
+            onClick={() => setPanel((p) => (p === "games" ? null : "games"))}
+          >
+            <Icon name="gamepad" size={19} />
+          </Ctrl>
+          <Ctrl
+            label="شرکت‌کنندگان"
+            tone={panel === "people" ? "warn" : "idle"}
+            onClick={() => setPanel((p) => (p === "people" ? null : "people"))}
+            badge={meeting.amHost && lobby.length > 0 ? faNum(lobby.length) : faNum(inCall.length)}
+          >
+            <Icon name="users" size={19} />
+          </Ctrl>
+
+          <div className="mx-0.5 h-7 w-px bg-line" />
+
+          {/* Leave / End Group */}
+          {meeting.amHost ? (
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => void requestLeave()}
+                aria-label="خروج از جلسه (بدون پایان)"
+                title="خروج موقت (جلسه برای اعضا باز می‌ماند)"
+                className="press flex h-11 items-center gap-1.5 rounded-2xl border border-line bg-surface-2/85 px-3.5 text-xs font-bold text-fg backdrop-blur-md transition hover:bg-surface-3"
+              >
+                <Icon name="door" size={17} /> <span className="hidden sm:inline">خروج</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => void endMeeting()}
+                aria-label="پایان جلسه برای همه"
+                title="پایان کامل جلسه برای همهٔ اعضا"
+                className="press flex h-11 items-center gap-1.5 rounded-2xl border border-rose-400/45 bg-rose-500/20 px-4 text-xs font-black text-rose-200 shadow-[0_6px_22px_rgba(244,63,94,.22)] backdrop-blur-xl transition hover:border-rose-400 hover:bg-rose-500/32"
+              >
+                <Icon name="phone-off" size={17} /> <span>پایان میت</span>
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => void requestLeave()}
+              aria-label="خروج از جلسه"
+              className="press flex h-11 items-center gap-1.5 rounded-2xl border border-rose-400/45 bg-rose-500/20 px-4 text-xs font-black text-rose-200 shadow-[0_6px_22px_rgba(244,63,94,.22)] backdrop-blur-xl transition hover:border-rose-400 hover:bg-rose-500/32"
+            >
+              <Icon name="phone-off" size={18} /> <span>خروج</span>
+            </button>
+          )}
+        </div>
       </footer>
 
       <ContextMenu state={menu} onClose={close} />

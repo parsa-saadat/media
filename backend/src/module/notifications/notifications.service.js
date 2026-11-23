@@ -2,7 +2,21 @@ import { findNotifications, countUnreadNotifications, markNotificationsRead, del
 
 export async function listFor(me) {
   const [items, unread] = await Promise.all([findNotifications(me.id), countUnreadNotifications(me.id)]);
-  return { unread, items: items.map((n) => ({ id: n._id, kind: n.kind, title: n.title, body: n.body, path: n.path ?? null, actorName: n.actorName ?? null, read: n.read, createdAt: n.createdAt })) };
+  return {
+    unread,
+    items: items.map((n) => ({
+      id: n._id,
+      kind: n.kind,
+      title: n.title,
+      body: n.body,
+      path: n.path ?? null,
+      actorName: n.actorName ?? null,
+      conversationId: typeof n.conversationId === "number" ? n.conversationId : null,
+      senderId: typeof n.senderId === "number" ? n.senderId : null,
+      read: n.read,
+      createdAt: n.createdAt,
+    })),
+  };
 }
 
 export async function markRead(me, ids) {

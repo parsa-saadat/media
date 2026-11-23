@@ -132,7 +132,7 @@ export default function SacredHeader({ compact = false }) {
     <header className="relative z-20 shrink-0 border-b border-line glass">
       <div className="shimmer-line absolute inset-x-0 bottom-0 h-px opacity-50" />
       <div className={`mx-auto flex max-w-[1700px] items-stretch gap-2 px-2 ${compact ? "py-1.5" : "py-2.5"} sm:px-4`}>
-        <div className="grid min-w-0 flex-1 grid-cols-2 gap-2">
+        <div className="grid min-w-0 flex-1 grid-cols-1 gap-2 sm:grid-cols-2">
           <Deck
             count={VERSES.length}
             ms={9000}

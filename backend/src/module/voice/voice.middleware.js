@@ -20,6 +20,10 @@ export const validateVoiceAction = (req) => {
     input = { action, joinToken, data, mime };
   } else if (action === "mic") {
     input = { action, joinToken, on: req.body.on === true };
+  } else if (action === "conn-state") {
+    const raw = text(req.body.state, 16);
+    const state = ["connecting", "connected", "relay", "reconnecting"].includes(raw) ? raw : "connecting";
+    input = { action: "conn-state", joinToken, state };
   } else if (action === "share") {
     input = { action, joinToken, on: req.body.on === true, quality: text(req.body.quality, 8) || "720p" };
   } else if (action === "signal") {
